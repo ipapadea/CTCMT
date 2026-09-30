@@ -75,9 +75,23 @@ _DET_TO_SEG_CLASS_CITYSCAPES = (11, 12, 13, 14, 15, 16, 17, 18)
 # ``roi_heads.`` are detection-only, ``sem_seg_head.`` is segmentation-only.
 _SHARED_PARAM_PREFIXES = ("backbone.",)
 
-_VALID_CONFLICT_MODES = ("none", "protect_det", "cagrad", "hard_decouple",
-                         "dyn_weight", "aux_head_only")
+# ResNet encoder only. Detectron2's Panoptic-FPN keeps both the bottom-up
+# ResNet and the FPN under ``backbone.``, so this narrower prefix is needed
+# for ResNet-block / FPN-open gradient routing.
+_RESNET_PARAM_PREFIXES = ("backbone.bottom_up.",)
 
+# _VALID_CONFLICT_MODES = ("none", "protect_det", "cagrad", "hard_decouple",
+                        #  "dyn_weight", "aux_head_only")
+_VALID_CONFLICT_MODES = (
+    "none",
+    "protect_det",
+    "cagrad",
+    "hard_decouple",
+    "dyn_weight",
+    "aux_head_only",
+    "resnet_route",
+    "task_coco",
+)
 
 # =====================================================================
 # Supervised contrastive loss (Khosla et al. 2020) --- compact inline.
@@ -279,6 +293,28 @@ class CTCMT_MTL(nn.Module):
                 f"{self.ctcr_weight_floor}"
             )
 
+        # Detector-dominant CT-CR. Both default off and leave the loss
+        # bit-identical; see defaults.py for the measurements behind them.
+        self.ctcr_score_order = bool(
+            getattr(cfg.SOLVER, "CTCMT_CTCR_SCORE_ORDER", False)
+        )
+        self.ctcr_det_score_weight = bool(
+            getattr(cfg.SOLVER, "CTCMT_CTCR_DET_SCORE_WEIGHT", False)
+        )
+        self.ctcr_det_score_gamma = float(
+            getattr(cfg.SOLVER, "CTCMT_CTCR_DET_SCORE_GAMMA", 1.0)
+        )
+
+        # Inverted CTPV: a confident detection suppresses the segmentation
+        # soft-CE where the seg teacher disagrees with the mapped class.
+        self.seg_det_veto = bool(getattr(cfg.SOLVER, "CTCMT_SEG_DET_VETO", False))
+        self.seg_det_veto_score = float(
+            getattr(cfg.SOLVER, "CTCMT_SEG_DET_VETO_SCORE", 0.9)
+        )
+        self.seg_det_veto_weight = float(
+            getattr(cfg.SOLVER, "CTCMT_SEG_DET_VETO_WEIGHT", 0.0)
+        )
+
         # Single-task ablation switches: disable one task branch entirely so
         # this meta-arch degenerates to a fair single-task-on-MTL-source baseline.
         self.det_only = bool(getattr(cfg.SOLVER, "CTCMT_DET_ONLY", False))
@@ -385,6 +421,28 @@ class CTCMT_MTL(nn.Module):
                 f"expected one of {sorted(_VALID_CONFLICT_MODES)}"
             )
         self.cagrad_alpha = float(getattr(cfg.SOLVER, "CTCMT_CAGRAD_ALPHA", 0.5))
+
+        # Task-CoCo: official CoCo-MT-TTA Gradient Consensus defaults.
+        # Adapted from leafheavy/MT-TTA/GradientConsensus.py (MIT License,
+        # Copyright (c) 2025 leafheavy).  These defaults intentionally mirror
+        # the official implementation: GC_c=0.5, 100 Adam iterations, lr=1.0,
+        # eps=1e-4, Adam betas=(0.9,0.999), weight_decay=1e-4.
+        #
+        # Only the Gradient Consensus component is used here.  CoCo's separate
+        # Fisher/Plasticity Constraint is NOT enabled in this ablation.
+        self.task_coco_gc_c = float(
+            getattr(cfg.SOLVER, "CTCMT_TASK_COCO_GC_C", 0.5)
+        )
+        self.task_coco_iters = max(int(
+            getattr(cfg.SOLVER, "CTCMT_TASK_COCO_ITERS", 100)
+        ), 1)
+        self.task_coco_lr = float(
+            getattr(cfg.SOLVER, "CTCMT_TASK_COCO_LR", 1.0)
+        )
+        self.task_coco_eps = float(
+            getattr(cfg.SOLVER, "CTCMT_TASK_COCO_EPS", 1e-4)
+        )
+
         self.freeze_shared_trunk = bool(
             getattr(cfg.SOLVER, "CTCMT_FREEZE_SHARED_TRUNK", False)
         )
@@ -402,13 +460,28 @@ class CTCMT_MTL(nn.Module):
         self._seg_agree_ema = None      # teacher/anchor pixel agreement
         self._seg_agree_max = 0.0
         self._route_lambda = self.aux_trunk_lambda
+        self.route_scope = str(
+            getattr(cfg.SOLVER, "CTCMT_ROUTE_SCOPE", "shared")
+        ).lower()
+        if self.route_scope not in ("shared", "fpn"):
+            raise ValueError(
+                f"Unsupported CTCMT_ROUTE_SCOPE={self.route_scope!r}; "
+                "expected 'shared' or 'fpn'"
+            )
         self.grad_diag = bool(getattr(cfg.SOLVER, "CTCMT_GRAD_DIAG", False))
         self.grad_diag_every = max(int(getattr(cfg.SOLVER, "CTCMT_GRAD_DIAG_EVERY", 50)), 1)
         self._param_index = None            # [(name, param)], built lazily
-        self._shared_names = None           # set[str]
+        self._shared_names = None           # names in ResNet + FPN
+        self._shared_set = None
+        self._resnet_names = None           # ResNet bottom-up only
+        self._resnet_set = None
+        self._fpn_names = None              # shared backbone minus ResNet bottom-up
+        self._fpn_set = None
+        self._routed_set = None             # legacy aux_head_only route-scope subset
         self._conflict_stats = {
             "steps": 0, "both": 0, "conflicts": 0, "projected": 0,
             "cos_sum": 0.0, "gamma_sum": 0.0, "w_det_sum": 0.0,
+            "w_seg_sum": 0.0, "c_det_sum": 0.0, "c_seg_sum": 0.0,
         }
         self._grad_fallbacks = 0
         # How often the conditional CoTTA-style aug-averaging actually fired.
@@ -742,6 +815,7 @@ class CTCMT_MTL(nn.Module):
         # With floor = 1.0, D reduces exactly to A.
         if self.ctcr_mode in ("full_box", "soft_seg_global"):
             use_soft_global = self.ctcr_mode == "soft_seg_global"
+            use_weights = use_soft_global or self.ctcr_det_score_weight
 
             B, K, H, W = s_seg_logits.shape
             target = torch.full(
@@ -761,6 +835,7 @@ class CTCMT_MTL(nn.Module):
                         mode="bilinear",
                         align_corners=False,
                     )
+            if use_weights:
                 weight = torch.zeros(
                     (B, H, W), dtype=torch.float32, device=s_seg_logits.device
                 )
@@ -770,8 +845,20 @@ class CTCMT_MTL(nn.Module):
             sy = H / max(img_h, 1)
             boxes = inst.pred_boxes.tensor.detach()
             classes = inst.pred_classes.detach().long().tolist()
+            box_list = boxes.tolist()
+            scores = (
+                inst.scores.detach().tolist() if inst.has("scores")
+                else [1.0] * len(classes)
+            )
 
-            for j, (x1, y1, x2, y2) in enumerate(boxes.tolist()):
+            order = list(range(len(classes)))
+            if self.ctcr_score_order:
+                # Later boxes overwrite earlier ones, and detections arrive
+                # score-descending, so ascending order lets the best box win.
+                order.sort(key=lambda i: scores[i])
+
+            for j in order:
+                x1, y1, x2, y2 = box_list[j]
                 c = classes[j]
                 if not (0 <= c < len(_DET_TO_SEG_CLASS_CITYSCAPES)):
                     continue
@@ -791,16 +878,28 @@ class CTCMT_MTL(nn.Module):
 
                 target[0, y1i:y2i, x1i:x2i] = seg_c
 
-                if use_soft_global:
-                    q = probs[0, seg_c, y1i:y2i, x1i:x2i].float().clamp(0.0, 1.0)
-                    floor = self.ctcr_weight_floor
-                    weight[0, y1i:y2i, x1i:x2i] = floor + (1.0 - floor) * q
+                if use_weights:
+                    if use_soft_global:
+                        q = probs[0, seg_c, y1i:y2i, x1i:x2i].float().clamp(0.0, 1.0)
+                        floor = self.ctcr_weight_floor
+                        w_box = floor + (1.0 - floor) * q
+                    else:
+                        w_box = torch.ones(
+                            (y2i - y1i, x2i - x1i),
+                            dtype=torch.float32,
+                            device=s_seg_logits.device,
+                        )
+                    if self.ctcr_det_score_weight:
+                        w_box = w_box * (
+                            max(float(scores[j]), 0.0) ** self.ctcr_det_score_gamma
+                        )
+                    weight[0, y1i:y2i, x1i:x2i] = w_box
 
             valid = target != 255
             if int(valid.sum()) == 0:
                 return None
 
-            if not use_soft_global:
+            if not use_weights:
                 return F.cross_entropy(
                     s_seg_logits, target, ignore_index=255
                 )
@@ -843,7 +942,12 @@ class CTCMT_MTL(nn.Module):
 
         boxes = inst.pred_boxes.tensor.detach()
         classes = inst.pred_classes.detach().long().tolist()
+        box_scores = (
+            inst.scores.detach().tolist() if inst.has("scores")
+            else [1.0] * len(classes)
+        )
         box_losses = []
+        box_weights = []
 
         for j, (x1, y1, x2, y2) in enumerate(boxes.tolist()):
             c = classes[j]
@@ -913,12 +1017,21 @@ class CTCMT_MTL(nn.Module):
                     )
 
             box_losses.append(box_loss)
+            box_weights.append(
+                max(float(box_scores[j]), 0.0) ** self.ctcr_det_score_gamma
+            )
 
         if not box_losses:
             return None
 
-        # Equal box contribution; no det-score weighting in this ablation.
-        return torch.stack(box_losses).mean()
+        if not self.ctcr_det_score_weight:
+            # Equal box contribution; no det-score weighting in this ablation.
+            return torch.stack(box_losses).mean()
+
+        bw = torch.tensor(
+            box_weights, dtype=torch.float32, device=s_seg_logits.device
+        )
+        return (torch.stack(box_losses) * bw).sum() / bw.sum().clamp_min(1e-6)
 
     @torch.no_grad()
     def _update_route_lambda(self, agree: float) -> float:
@@ -954,11 +1067,42 @@ class CTCMT_MTL(nn.Module):
             self._param_index = [
                 (n, p) for n, p in self.student.named_parameters() if p.requires_grad
             ]
+
+            # Entire shared representation: ResNet bottom-up + FPN.
             self._shared_names = [
                 n for n, _ in self._param_index
                 if any(n.startswith(pfx) for pfx in _SHARED_PARAM_PREFIXES)
             ]
             self._shared_set = set(self._shared_names)
+
+            # ResNet encoder only. In the new ``resnet_route`` mode auxiliary
+            # gradients are scaled/blocked here, while the FPN stays fully MTL.
+            self._resnet_names = [
+                n for n, _ in self._param_index
+                if any(n.startswith(pfx) for pfx in _RESNET_PARAM_PREFIXES)
+            ]
+            self._resnet_set = set(self._resnet_names)
+
+            # Everything shared that is not bottom-up ResNet belongs to the FPN
+            # (lateral/output convs, top block, etc.).
+            self._fpn_names = [
+                n for n in self._shared_names if n not in self._resnet_set
+            ]
+            self._fpn_set = set(self._fpn_names)
+
+            # Preserve the old aux_head_only / E38 route-scope behaviour exactly.
+            if self.route_scope == "fpn":
+                self._routed_set = self._fpn_set
+            else:
+                self._routed_set = self._shared_set
+
+            if self.conflict_mode == "resnet_route":
+                print(
+                    f"[CT-CMT-ROUTE] shared={len(self._shared_names)} "
+                    f"resnet={len(self._resnet_names)} "
+                    f"fpn={len(self._fpn_names)} "
+                    f"lam={self._route_lambda:.2f}"
+                )
 
     def _snapshot_grads(self):
         """Clone the current .grad of every trainable student param, then clear."""
@@ -970,6 +1114,17 @@ class CTCMT_MTL(nn.Module):
         """<ga, gb> over shared-trunk parameters only, as one flattened vector."""
         acc = None
         for n in self._shared_names:
+            a, b = ga.get(n), gb.get(n)
+            if a is None or b is None:
+                continue
+            t = (a * b).sum()
+            acc = t if acc is None else acc + t
+        return 0.0 if acc is None else float(acc)
+
+    def _subset_dot(self, ga, gb, names) -> float:
+        """Dot product over an explicit parameter-name subset."""
+        acc = None
+        for n in names:
             a, b = ga.get(n), gb.get(n)
             if a is None or b is None:
                 continue
@@ -993,12 +1148,238 @@ class CTCMT_MTL(nn.Module):
             for k, v in acc.items()
         }
 
+    @staticmethod
+    def _task_coco_consensus_coeffs(
+        g11: float,
+        g12: float,
+        g22: float,
+        gc_c: float = 0.5,
+        iters: int = 100,
+        lr_default: float = 1.0,
+        eps: float = 1e-4,
+    ):
+        """Return official CoCo Gradient-Consensus coefficients for two tasks.
+
+        This is a memory-efficient port of leafheavy/MT-TTA's official
+        ``GradientConsensus.gradient_consensus`` implementation.  The official
+        code first flattens every task gradient and builds ``GG = grads @ grads.T``.
+        Here the caller already provides that exact 2x2 Gram matrix through
+        ``g11=<g_det,g_det>``, ``g12=<g_det,g_seg>``, ``g22=<g_seg,g_seg>``.
+
+        The optimization itself intentionally mirrors the official repository:
+          * mean gradient g0 through row/overall means of the normalized Gram;
+          * softmax task weights optimized with Adam for 100 iterations by default;
+          * objective ``<g_w,g_0> + phi * ||g_w||``;
+          * final *unscaled* direction used by the released code.
+
+        Returns
+        -------
+        c_det, c_seg, w_det, w_seg
+            ``g_GC = c_det * g_det + c_seg * g_seg`` on shared parameters,
+            while ``w_*`` are the simplex weights optimized by CoCo.
+        """
+        # The official implementation moves the tiny task Gram matrix to CPU
+        # for the weight search.  Keeping this 2x2 optimization on CPU also
+        # avoids retaining/flattening a second copy of the full backbone grads.
+        GG = torch.tensor(
+            [[g11, g12], [g12, g22]],
+            dtype=torch.float32,
+            device="cpu",
+        )
+        scale = (torch.diag(GG) + eps).sqrt().mean()
+        GG = GG / scale.pow(2)
+
+        Gg = GG.mean(1, keepdim=True)
+        gg = Gg.mean(0, keepdim=True)
+
+        w = torch.zeros(2, 1, requires_grad=True, device="cpu")
+        w_opt = torch.optim.Adam(
+            [w], lr=lr_default, betas=(0.9, 0.999), weight_decay=1e-4
+        )
+        phi_sqrt = (gg + eps).sqrt() * gc_c
+
+        w_best = None
+        obj_best = float("inf")
+        for i in range(iters):
+            w_opt.zero_grad()
+            ww = torch.softmax(w, 0)
+            term1 = ww.t().mm(Gg)
+            term2 = (ww.t().mm(GG).mm(ww) + eps).sqrt()
+            obj = term1 + phi_sqrt * term2
+
+            obj_scalar = float(obj.item())
+            if obj_scalar < obj_best:
+                obj_best = obj_scalar
+                w_best = w.detach().clone()
+            if i < iters - 1:
+                obj.backward()
+                w_opt.step()
+
+        ww = torch.softmax(w_best, 0)
+        gw_norm = (ww.t().mm(GG).mm(ww) + eps).sqrt()
+        lambda_frac = phi_sqrt.view(-1) / (gw_norm + eps)
+
+        # This matches the released CoCo code exactly: the optional
+        # /(1 + GC_c**2) scaling is commented out in GradientConsensus.py.
+        coeffs = 0.5 + ww.view(-1) * lambda_frac.reshape(())
+        return (
+            float(coeffs[0].item()),
+            float(coeffs[1].item()),
+            float(ww[0].item()),
+            float(ww[1].item()),
+        )
+
+    def _backward_task_coco(self, loss_dict):
+        """Task-level CoCo consensus for detection vs semantic segmentation.
+
+        The existing CT-CMT/CT-CR formulation is left untouched.  Only the
+        *task* gradients on the shared Panoptic-FPN backbone are reconciled:
+
+            g_det = d L_det / d theta_shared
+            g_seg = d L_seg / d theta_shared
+            g_shared = CoCo(g_det, g_seg) + g_regularizers
+
+        where ``g_regularizers`` contains CT-CR, CT-CL, prototype loss, etc.
+        Those cross-task/auxiliary terms keep their native full gradients and
+        are deliberately NOT folded into ``g_seg``.  Task-specific heads also
+        keep their native gradients; CoCo is applied only to ``backbone.*``
+        (ResNet bottom-up + FPN), the parameters shared by both tasks.
+
+        If either task loss is absent on a gated/empty-pseudo step, there is no
+        two-task consensus problem and we fall back to the unchanged joint
+        backward for that step.
+        """
+        diag = {}
+        groups = {}
+        for k, v in loss_dict.items():
+            group = k.split("/")[0]
+            groups[group] = v if group not in groups else groups[group] + v
+
+        det_loss = groups.get("det")
+        seg_loss = groups.get("seg")
+        reg_keys = sorted(k for k in groups if k not in ("det", "seg"))
+
+        # Faithful task-level consensus requires both task objectives.
+        if (
+            det_loss is None
+            or seg_loss is None
+            or not det_loss.requires_grad
+            or not seg_loss.requires_grad
+        ):
+            total = sum(loss_dict.values())
+            if total.requires_grad:
+                total.backward()
+            diag["task_coco_active"] = False
+            return diag
+
+        self._ensure_param_index()
+
+        passes = [("det", det_loss), ("seg", seg_loss)]
+        if reg_keys:
+            reg_loss = sum(groups[k] for k in reg_keys)
+            if reg_loss.requires_grad:
+                passes.append(("reg", reg_loss))
+
+        grads = {}
+        for i, (name, loss) in enumerate(passes):
+            loss.backward(retain_graph=(i < len(passes) - 1))
+            grads[name] = self._snapshot_grads()
+
+        g_det = grads["det"]
+        g_seg = grads["seg"]
+        g_reg = grads.get("reg", {})
+
+        gdd = self._shared_dot(g_det, g_det)
+        gds = self._shared_dot(g_det, g_seg)
+        gss = self._shared_dot(g_seg, g_seg)
+        nd = math.sqrt(max(gdd, 0.0))
+        ns = math.sqrt(max(gss, 0.0))
+        cos = gds / (nd * ns + 1e-12)
+        conflict = gds < 0.0
+
+        # Degenerate shared gradient: preserve the native update instead of
+        # feeding an ill-defined task into the consensus search.
+        if gdd <= 1e-24 or gss <= 1e-24:
+            c_det = c_seg = 1.0
+            w_det = w_seg = 0.5
+            consensus_applied = False
+        else:
+            c_det, c_seg, w_det, w_seg = self._task_coco_consensus_coeffs(
+                gdd,
+                gds,
+                gss,
+                gc_c=self.task_coco_gc_c,
+                iters=self.task_coco_iters,
+                lr_default=self.task_coco_lr,
+                eps=self.task_coco_eps,
+            )
+            consensus_applied = True
+
+        nr = math.sqrt(max(self._shared_dot(g_reg, g_reg), 0.0)) if g_reg else 0.0
+        diag.update({
+            "task_coco_active": consensus_applied,
+            "cos": cos,
+            "conflict": conflict,
+            "g_det": nd,
+            "g_seg": ns,
+            "g_reg": nr,
+            "w_det": w_det,
+            "w_seg": w_seg,
+            "c_det": c_det,
+            "c_seg": c_seg,
+            "gc_c": self.task_coco_gc_c,
+        })
+
+        # CoCo changes only the two native task gradients on the shared
+        # representation.  Cross-task regularizers (especially CT-CR) stay
+        # exactly as they were: coefficient 1.0 everywhere they naturally flow.
+        for n, p in self._param_index:
+            gd = g_det.get(n)
+            gs = g_seg.get(n)
+            gr = g_reg.get(n)
+
+            if gd is None and gs is None and gr is None:
+                p.grad = None
+                continue
+
+            out = torch.zeros_like(p)
+            if n in self._shared_set:
+                if gd is not None:
+                    out.add_(gd, alpha=c_det)
+                if gs is not None:
+                    out.add_(gs, alpha=c_seg)
+            else:
+                # Task-specific heads: native task gradients, no CoCo surgery.
+                if gd is not None:
+                    out.add_(gd)
+                if gs is not None:
+                    out.add_(gs)
+
+            if gr is not None:
+                out.add_(gr)
+            p.grad = out
+
+        s = self._conflict_stats
+        s["steps"] += 1
+        s["both"] += 1
+        s["conflicts"] += int(conflict)
+        s["projected"] += int(consensus_applied)
+        s["cos_sum"] += cos
+        s["w_det_sum"] += w_det
+        s["w_seg_sum"] += w_seg
+        s["c_det_sum"] += c_det
+        s["c_seg_sum"] += c_seg
+        return diag
+
     def _backward_and_combine(self, loss_dict):
         """Backward pass(es) + shared-trunk gradient combination.
 
         On return the student's ``.grad`` fields hold exactly what the optimizer
         should apply. Returns a diagnostics dict (logging only).
         """
+        if self.conflict_mode == "task_coco":
+            return self._backward_task_coco(loss_dict)
+
         diag = {}
         groups = {}
         for k, v in loss_dict.items():
@@ -1019,17 +1400,28 @@ class CTCMT_MTL(nn.Module):
             if total.requires_grad:
                 total.backward()
                 if self.conflict_mode == "aux_head_only" and det_loss is None:
-                    # Routing is unconditional, so the aux objective must not
-                    # reach the trunk at full strength even on steps with no
-                    # detection gradient.
+                    # Preserve the legacy S6/E38 path exactly.
                     self._ensure_param_index()
                     lam = self._route_lambda
                     for n, p in self._param_index:
-                        if n not in self._shared_set or p.grad is None:
+                        if n not in self._routed_set or p.grad is None:
                             continue
                         p.grad = None if lam == 0.0 else p.grad * lam
                     self._conflict_stats["aux_only_routed"] = (
                         self._conflict_stats.get("aux_only_routed", 0) + 1)
+
+                elif self.conflict_mode == "resnet_route" and det_loss is None:
+                    # No detector gradient on this step: still prevent the
+                    # segmentation/CT-CR objective from bypassing the route and
+                    # updating ResNet at full strength. FPN + aux heads stay open.
+                    self._ensure_param_index()
+                    lam = self._route_lambda
+                    for n, p in self._param_index:
+                        if n not in self._resnet_set or p.grad is None:
+                            continue
+                        p.grad = torch.zeros_like(p.grad) if lam == 0.0 else p.grad * lam
+                    self._conflict_stats["aux_only_resnet_routed"] = (
+                        self._conflict_stats.get("aux_only_resnet_routed", 0) + 1)
             return diag
 
         self._ensure_param_index()
@@ -1061,8 +1453,12 @@ class CTCMT_MTL(nn.Module):
         nd2 = self._shared_dot(g_det, g_det)
         nd = math.sqrt(max(nd2, 0.0))
         if want_components:
+            # Norms are over shared-trunk params only: each component's share of
+            # the gradient that can carry negative transfer.
+            diag["gnorm_det"] = nd
             for name, comp in grads.items():
                 nc = math.sqrt(max(self._shared_dot(comp, comp), 0.0))
+                diag[f"gnorm_{name}"] = nc
                 diag[f"cos_det_{name}"] = self._shared_dot(g_det, comp) / (nd * nc + 1e-12)
 
         dot = self._shared_dot(g_det, g_aux)
@@ -1071,6 +1467,20 @@ class CTCMT_MTL(nn.Module):
         cos = dot / (nd * na + 1e-12)
         conflict = dot < 0.0
         diag.update({"cos": cos, "g_det": nd, "g_aux": na, "conflict": conflict})
+
+        # Route-specific diagnostics. These are pre-routing norms; the applied
+        # auxiliary ResNet norm is exactly lambda * pre-routing norm, while FPN
+        # remains unchanged in ``resnet_route``.
+        if self.conflict_mode == "resnet_route" or want_components:
+            det_res2 = self._subset_dot(g_det, g_det, self._resnet_names)
+            aux_res2 = self._subset_dot(g_aux, g_aux, self._resnet_names)
+            det_fpn2 = self._subset_dot(g_det, g_det, self._fpn_names)
+            aux_fpn2 = self._subset_dot(g_aux, g_aux, self._fpn_names)
+            diag["g_det_resnet"] = math.sqrt(max(det_res2, 0.0))
+            diag["g_aux_resnet"] = math.sqrt(max(aux_res2, 0.0))
+            diag["g_det_fpn"] = math.sqrt(max(det_fpn2, 0.0))
+            diag["g_aux_fpn"] = math.sqrt(max(aux_fpn2, 0.0))
+
         if want_components:
             diag["blocks"] = self._shared_block_cos(g_det, g_aux)
 
@@ -1104,20 +1514,40 @@ class CTCMT_MTL(nn.Module):
             c_aux_shared = 0.0 if conflict else 1.0
             diag["decoupled"] = conflict
         elif self.conflict_mode == "aux_head_only":
-            # Detection owns the shared representation; the auxiliary objective
-            # reaches the trunk only through lambda (0 = S6, 1 = joint update).
+            # Detection owns the selected shared representation; the auxiliary
+            # objective reaches it only through lambda (legacy S6/E38 path).
             c_aux_shared = self._route_lambda
             diag["decoupled"] = True
             diag["lam"] = c_aux_shared
+        elif self.conflict_mode == "resnet_route":
+            # New ResNet-block / FPN-open path:
+            #   ResNet: g_det + lambda * g_aux
+            #   FPN:    g_det + g_aux
+            #   heads:  their native full gradients
+            # lambda=0 is the static detector-owned ResNet experiment.
+            diag["resnet_routed"] = True
+            diag["lam"] = self._route_lambda
+            diag["g_aux_resnet_applied"] = (
+                self._route_lambda * diag.get("g_aux_resnet", 0.0)
+            )
+            diag["g_aux_fpn_applied"] = diag.get("g_aux_fpn", 0.0)
         elif self.conflict_mode == "dyn_weight":
             gamma = max(0.0, cos)
             c_aux_shared = c_aux_other = gamma
             diag["gamma"] = gamma
 
         for n, p in self._param_index:
-            shared = n in self._shared_set
-            cd = c_det if shared else 1.0
-            ca = c_aux_shared if shared else c_aux_other
+            if self.conflict_mode == "resnet_route":
+                # Detection keeps full authority everywhere. Auxiliary gradients
+                # are routed only through the ResNet bottom-up; FPN and task
+                # heads retain the full auxiliary signal.
+                cd = 1.0
+                ca = self._route_lambda if n in self._resnet_set else 1.0
+            else:
+                routed = n in self._routed_set
+                cd = c_det if routed else 1.0
+                ca = c_aux_shared if routed else c_aux_other
+
             gd, ga = g_det.get(n), g_aux.get(n)
             if gd is None and ga is None:
                 p.grad = None
@@ -1135,7 +1565,11 @@ class CTCMT_MTL(nn.Module):
         s["steps"] += 1
         s["both"] += 1
         s["conflicts"] += int(conflict)
-        s["projected"] += int(diag.get("projected", False) or diag.get("decoupled", False))
+        s["projected"] += int(
+            diag.get("projected", False)
+            or diag.get("decoupled", False)
+            or diag.get("resnet_routed", False)
+        )
         s["cos_sum"] += cos
         s["gamma_sum"] += diag.get("gamma", 0.0)
         s["w_det_sum"] += diag.get("w_det", 0.0)
@@ -1236,14 +1670,18 @@ class CTCMT_MTL(nn.Module):
 
     @torch.no_grad()
     def _diag_masked_ctcr_stats(self, instances, teacher_seg_probs, file_name):
-        """Diagnostic-only masked CT-CR support statistics against semantic GT.
+        """Diagnostic-only CT-CR spatial-support statistics against semantic GT.
 
         For every pre-CTPV pseudo-box and every configured probability threshold,
         log:
           - box_pixels: number of pixels inside the box on the seg grid
           - gt_pixels: GT pixels of the mapped semantic class inside the box
-          - mask_pixels: pixels where teacher P(class) >= tau
-          - intersection: teacher mask pixels that are also GT class pixels
+          - sweep: SEGMENTATION-derived support, teacher P(class) >= tau
+          - mask_sweep: DETECTION-derived support, teacher mask head >= tau
+        each entry carrying mask_pixels and its intersection with the GT pixels.
+
+        The rectangle baseline (CT-CR mode A) needs no sweep: it covers the whole
+        box, so mask_pixels == box_pixels and intersection == gt_pixels.
 
         These values are used only for post-hoc analysis.
         """
@@ -1268,6 +1706,10 @@ class CTCMT_MTL(nn.Module):
 
         inst = instances[0]
         _, K, H, W = teacher_seg_probs.shape
+
+        # Detector-derived spatial prior. Present whenever the teacher keeps its
+        # mask head; (N, 1, M, M) posteriors in the ROI frame, not yet pasted.
+        pred_masks = inst.pred_masks if inst.has("pred_masks") else None
 
         # Resize semantic trainIds to exactly the teacher-probability grid.
         gt_t = torch.from_numpy(gt_np).to(teacher_seg_probs.device)
@@ -1320,6 +1762,24 @@ class CTCMT_MTL(nn.Module):
                     "intersection": intersection,
                 })
 
+            mask_sweep = []
+            mean_mask_prob = None
+            if pred_masks is not None:
+                m = F.interpolate(
+                    pred_masks[j:j + 1].float(),
+                    size=(y2i - y1i, x2i - x1i),
+                    mode="bilinear",
+                    align_corners=False,
+                )[0, 0]
+                mean_mask_prob = float(m.mean().item())
+                for tau in self.mask_diag_thresholds:
+                    pm = m >= float(tau)
+                    mask_sweep.append({
+                        "tau": float(tau),
+                        "mask_pixels": int(pm.sum().item()),
+                        "intersection": int((pm & gt_mask).sum().item()),
+                    })
+
             out.append({
                 "box_idx": int(j),
                 "det_class": int(c),
@@ -1328,7 +1788,9 @@ class CTCMT_MTL(nn.Module):
                 "box_pixels": box_pixels,
                 "gt_pixels": gt_pixels,
                 "mean_class_prob": float(q.mean().item()),
+                "mean_mask_prob": mean_mask_prob,
                 "sweep": sweep,
+                "mask_sweep": mask_sweep,
             })
 
         return out
@@ -1633,6 +2095,25 @@ class CTCMT_MTL(nn.Module):
                 mean_seg_conf = float(seg_probs_gate.max(dim=1)[0].mean().item())
                 seg_gate = mean_seg_conf < self.per_task_gate_seg_thresh
 
+        # Diagnostic-only: score the spatial priors CT-CR could use against
+        # semantic GT. Runs before CTPV so the box set is unfiltered, and is
+        # independent of it so the current CTPV-off configs can be measured.
+        if (self.diag_jsonl and self.mask_diag_gt_root
+                and teacher_sem_results is not None
+                and len(pseudo_inst[0]) > 0):
+            with torch.no_grad():
+                self._diag_write({
+                    "type": "masked_ctcr",
+                    "iter": int(self.iter),
+                    "file_name": batched_inputs[0].get("file_name"),
+                    "keep_step": bool(keep_step),
+                    "boxes": self._diag_masked_ctcr_stats(
+                        pseudo_inst,
+                        teacher_sem_results.float().softmax(dim=1),
+                        batched_inputs[0].get("file_name"),
+                    ),
+                })
+
         # V3: cross-task pseudo-label verification.
         if self.ctpv_enabled and len(pseudo_inst[0]) > 0:
             with torch.no_grad():
@@ -1651,14 +2132,6 @@ class CTCMT_MTL(nn.Module):
                     int(pseudo_inst[0].image_size[0]),
                     int(pseudo_inst[0].image_size[1]),
                 ]
-
-                masked_ctcr_records = []
-                if self.diag_jsonl and self.mask_diag_gt_root:
-                    masked_ctcr_records = self._diag_masked_ctcr_stats(
-                        pseudo_inst,
-                        t_seg_probs_ctpv,
-                        batched_inputs[0].get("file_name"),
-                    )
 
                 if self.diag_jsonl:
                     pseudo_inst, ctpv_records = self._ctpv_filter(
@@ -1702,7 +2175,6 @@ class CTCMT_MTL(nn.Module):
                             / max(n_before_ctpv, 1)
                         ),
                         "boxes": ctpv_records,
-                        "masked_ctcr": masked_ctcr_records,
                     })
 
         elif self.ctpv_enabled and self.diag_jsonl:
@@ -1733,7 +2205,6 @@ class CTCMT_MTL(nn.Module):
                 "n_rejected": 0,
                 "rejection_rate": 0.0,
                 "boxes": [],
-                "masked_ctcr": [],
             })
 
         # 2. Student full forward (backbone -> heads) to get everything we need
@@ -1815,6 +2286,38 @@ class CTCMT_MTL(nn.Module):
                     cb_w = inv[teacher_seg_probs_full.argmax(dim=1)]
                     cb_w = cb_w / cb_w.mean().clamp_min(1e-6)
                 pixel_w = cb_w if pixel_w is None else pixel_w * cb_w
+
+            if self.seg_det_veto and len(pseudo_inst[0]) > 0:
+                # Inverted CTPV: trust the detector over the seg teacher inside
+                # a confident box, by muting the pixels where they disagree.
+                with torch.no_grad():
+                    inst_v = pseudo_inst[0]
+                    Hs, Ws = per_pixel_ce.shape[-2:]
+                    ih, iw = inst_v.image_size
+                    vx, vy = Ws / max(iw, 1), Hs / max(ih, 1)
+                    t_arg = teacher_seg_probs_full.argmax(dim=1)
+                    veto = torch.ones_like(per_pixel_ce)
+                    v_scores = inst_v.scores.tolist()
+                    v_classes = inst_v.pred_classes.long().tolist()
+                    for jj, (bx1, by1, bx2, by2) in enumerate(
+                            inst_v.pred_boxes.tensor.tolist()):
+                        if v_scores[jj] < self.seg_det_veto_score:
+                            continue
+                        cc = v_classes[jj]
+                        if not (0 <= cc < len(_DET_TO_SEG_CLASS_CITYSCAPES)):
+                            continue
+                        sc = _DET_TO_SEG_CLASS_CITYSCAPES[cc]
+                        if sc >= teacher_seg_probs_full.shape[1]:
+                            continue
+                        a1 = max(int(round(bx1 * vx)), 0)
+                        b1 = max(int(round(by1 * vy)), 0)
+                        a2 = min(int(round(bx2 * vx)), Ws)
+                        b2 = min(int(round(by2 * vy)), Hs)
+                        if a2 <= a1 or b2 <= b1:
+                            continue
+                        sub = veto[0, b1:b2, a1:a2]
+                        sub[t_arg[0, b1:b2, a1:a2] != sc] = self.seg_det_veto_weight
+                pixel_w = veto if pixel_w is None else pixel_w * veto
 
             if pixel_w is None:
                 loss_seg = per_pixel_ce.mean()
@@ -1927,8 +2430,10 @@ class CTCMT_MTL(nn.Module):
             aug = (f" segaug={self._seg_aug_fired}/{self._seg_steps}"
                    if self.seg_aug_enabled else "")
             rt = ""
-            if self.conflict_mode == "aux_head_only":
+            if self.conflict_mode in ("aux_head_only", "resnet_route"):
                 rt = f" lam={self._route_lambda:.2f}"
+                if self.conflict_mode == "resnet_route":
+                    rt += " route=resnet"
                 if self.adaptive_routing and self._seg_agree_ema is not None:
                     rt += (f" agree={self._seg_agree_ema:.4f}"
                            f"/{self._seg_agree_max:.4f}")
@@ -1937,7 +2442,29 @@ class CTCMT_MTL(nn.Module):
             s = self._conflict_stats
             if s["both"] > 0:
                 n = s["both"]
-                print(f"[CT-CMT-GRAD] iter={self.iter} mode={self.conflict_mode} "
+                if self.conflict_mode == "task_coco":
+                    print(
+                        f"[CT-CMT-COCO] iter={self.iter} "
+                        f"cos_det_seg={grad_diag.get('cos', float('nan')):.4f} "
+                        f"cos_mean={s['cos_sum'] / n:.4f} "
+                        f"conflict_rate={s['conflicts'] / n:.4f} "
+                        f"g_det={grad_diag.get('g_det', float('nan')):.5f} "
+                        f"g_seg={grad_diag.get('g_seg', float('nan')):.5f} "
+                        f"g_reg={grad_diag.get('g_reg', float('nan')):.5f} "
+                        f"w_det={grad_diag.get('w_det', float('nan')):.4f} "
+                        f"w_seg={grad_diag.get('w_seg', float('nan')):.4f} "
+                        f"c_det={grad_diag.get('c_det', float('nan')):.4f} "
+                        f"c_seg={grad_diag.get('c_seg', float('nan')):.4f} "
+                        f"w_det_mean={s['w_det_sum'] / n:.4f} "
+                        f"w_seg_mean={s['w_seg_sum'] / n:.4f} "
+                        f"c_det_mean={s['c_det_sum'] / n:.4f} "
+                        f"c_seg_mean={s['c_seg_sum'] / n:.4f} "
+                        f"GC_c={self.task_coco_gc_c:.3f} "
+                        f"fallbacks={self._grad_fallbacks} "
+                        f"n_steps={n}"
+                    )
+                else:
+                    print(f"[CT-CMT-GRAD] iter={self.iter} mode={self.conflict_mode} "
                       f"cos={grad_diag.get('cos', float('nan')):.4f} "
                       f"cos_mean={s['cos_sum'] / n:.4f} "
                       f"conflict_rate={s['conflicts'] / n:.4f} "
@@ -1945,20 +2472,29 @@ class CTCMT_MTL(nn.Module):
                       f"g_det={grad_diag.get('g_det', float('nan')):.5f} "
                       f"g_aux={grad_diag.get('g_aux', float('nan')):.5f} "
                       f"g_aux_proj={grad_diag.get('g_aux_proj', float('nan')):.5f} "
+                      f"g_det_R={grad_diag.get('g_det_resnet', float('nan')):.5f} "
+                      f"g_aux_R={grad_diag.get('g_aux_resnet', float('nan')):.5f} "
+                      f"g_aux_R_applied={grad_diag.get('g_aux_resnet_applied', float('nan')):.5f} "
+                      f"g_det_FPN={grad_diag.get('g_det_fpn', float('nan')):.5f} "
+                      f"g_aux_FPN={grad_diag.get('g_aux_fpn', float('nan')):.5f} "
+                      f"g_aux_FPN_applied={grad_diag.get('g_aux_fpn_applied', float('nan')):.5f} "
                       f"gamma={grad_diag.get('gamma', float('nan')):.4f} "
                       f"gamma_mean={s['gamma_sum'] / n:.4f} "
                       f"w_det={grad_diag.get('w_det', float('nan')):.4f} "
-                      f"w_det_mean={s['w_det_sum'] / n:.4f} "
-                      f"fallbacks={self._grad_fallbacks} "
-                      f"n_steps={n}")
+                          f"w_det_mean={s['w_det_sum'] / n:.4f} "
+                          f"fallbacks={self._grad_fallbacks} "
+                          f"n_steps={n}")
         if grad_diag and any(k.startswith("cos_det_") for k in grad_diag):
             comps = " ".join(
                 f"{k}={grad_diag[k]:.4f}" for k in sorted(grad_diag) if k.startswith("cos_det_")
             )
+            norms = " ".join(
+                f"{k}={grad_diag[k]:.6f}" for k in sorted(grad_diag) if k.startswith("gnorm_")
+            )
             blocks = " ".join(
                 f"blk_{k}={v:.4f}" for k, v in sorted(grad_diag.get("blocks", {}).items())
             )
-            print(f"[CT-CMT-GRADDIAG] iter={self.iter} {comps} {blocks}")
+            print(f"[CT-CMT-GRADDIAG] iter={self.iter} {comps} {norms} {blocks}")
 
         # 5. Report TEACHER predictions for evaluation (no panoptic combine).
         with torch.no_grad():
