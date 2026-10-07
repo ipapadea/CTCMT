@@ -62,6 +62,7 @@ def make(mode, grad_diag=False, alpha=0.5):
     m.cagrad_alpha = alpha
     m.grad_diag = grad_diag
     m.grad_diag_every = 1
+    m.route_scope = "shared"
     m.iter = 0
     m.aux_trunk_lambda = 0.0
     m._route_lambda = 0.0
@@ -71,6 +72,7 @@ def make(mode, grad_diag=False, alpha=0.5):
     m._seg_agree_ema = None
     m._seg_agree_max = 0.0
     m._param_index = None
+    m._routed_set = None
     m._shared_names = None
     m._conflict_stats = {
         "steps": 0, "both": 0, "conflicts": 0, "projected": 0,

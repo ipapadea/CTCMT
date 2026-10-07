@@ -13,6 +13,9 @@ nn.Module.__init__(m)
 m.ctcr_mode = "per_box_full"
 m.ctcr_mask_thresh = 0.3
 m.ctcr_weight_floor = 0.2
+m.ctcr_score_order = False
+m.ctcr_det_score_weight = False
+m.ctcr_det_score_gamma = 1.0
 
 inst = Instances((8, 8))
 inst.pred_boxes = Boxes(torch.tensor([

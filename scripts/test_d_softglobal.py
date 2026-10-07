@@ -23,6 +23,9 @@ def make(mode, floor):
     m.ctcr_mode = mode
     m.ctcr_mask_thresh = 0.3
     m.ctcr_weight_floor = floor
+    m.ctcr_score_order = False
+    m.ctcr_det_score_weight = False
+    m.ctcr_det_score_gamma = 1.0
     return m
 
 

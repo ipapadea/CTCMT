@@ -17,6 +17,14 @@ CSC_ROOT="${CSC_ROOT:-/media/ilias/DATA/ilias/cityscapes_c}"
 # Mount whole: annotations/*.json are relative symlinks into this parent.
 CITYSCAPES_ROOT="${CITYSCAPES_ROOT:-/media/ilias/DATA/ilias/cityscapes}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-amrod:latest}"
+EXTRA_OPTS="${EXTRA_OPTS:-}"
+
+# Optional diagnostics. Unset by default, so the docker invocation and the
+# adaptation trajectory are unchanged for every existing run.
+DIAG_ENVS=()
+[[ -n "${CTCMT_DIAG_JSONL:-}" ]] && DIAG_ENVS+=(-e "CTCMT_DIAG_JSONL=${CTCMT_DIAG_JSONL}")
+[[ -n "${CTCMT_MASK_DIAG_GT_ROOT:-}" ]] && DIAG_ENVS+=(-e "CTCMT_MASK_DIAG_GT_ROOT=${CTCMT_MASK_DIAG_GT_ROOT}")
+[[ -n "${CTCMT_MASK_DIAG_THRESHOLDS:-}" ]] && DIAG_ENVS+=(-e "CTCMT_MASK_DIAG_THRESHOLDS=${CTCMT_MASK_DIAG_THRESHOLDS}")
 
 CYCLE=(fog motion_blur snow brightness defocus_blur)
 OUT="/workspace/output/ctta_acdc/${EXP}"
@@ -65,6 +73,7 @@ docker run --rm \
   -e NVIDIA_TF32_OVERRIDE=0 \
   -e DETECTRON2_DATASETS=/datasets \
   -e PYTHONPATH=/workspace/amrod/detectron2 \
+  ${DIAG_ENVS[@]+"${DIAG_ENVS[@]}"} \
   -v "${HOST_REPO}:/workspace/amrod:ro" \
   -v "${CITYSCAPES_ROOT}:/datasets/cityscapes:ro" \
   "${MOUNTS[@]}" \
@@ -77,7 +86,7 @@ docker run --rm \
       --num-gpus 1 \
       OUTPUT_DIR ${OUT} \
       SEED ${SEED} \
-      DATASETS.TEST '${STREAM}'
+      DATASETS.TEST '${STREAM}' ${EXTRA_OPTS}
   " 2>&1 | tee "${LOG}"
 
 echo

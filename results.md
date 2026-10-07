@@ -243,6 +243,41 @@ S6 versus the detection-only ceiling, over three seeds: **mAP0.5 is a tie** (dif
 
 **Routing and restoration are substitutes, not complements.** S6 already prevents the segmentation collapse, so adding restoration on top contributes nothing late, and on ACDC it recovers only a fraction of the mIoU that routing gives away.
 
+<!-- sharedroute:begin -->
+## Adaptive shared-route (new-source, long-term)
+
+Config `newsrc_adaptive_sharedroute_{cscLT,acdcLT}.yaml`, Panoptic FPN R50 MTL source, no reset, online batch size 1. Maintained by `scripts/update_sharedroute_results.py` (re-run it as seeds finish); only completed runs are listed.
+
+| Protocol | Seeds | AP50 | mIoU | R1 AP50 | R10 AP50 | R1 mIoU | R10 mIoU |
+|---|---|---|---|---|---|---|---|
+| `cscLT` | 0 | 27.98 | 36.96 | 18.78 | 31.47 | 31.86 | 38.00 |
+| `acdcLT` | 0 | 44.11 | 40.32 | 37.98 | 46.06 | 37.39 | 40.71 |
+
+### Cityscapes-C long-term &mdash; mAP0.5 (rounds 1, 5, 10)
+
+| Seed | R1 Fog | R1 Motion | R1 Snow | R1 Bright | R1 Defocus | R5 Fog | R5 Motion | R5 Snow | R5 Bright | R5 Defocus | R10 Fog | R10 Motion | R10 Snow | R10 Bright | R10 Defocus | Mean |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 39.6 | 12.4 | 0.2 | 30.6 | 11.1 | 50.2 | 22.9 | 1.0 | 47.9 | 24.7 | 50.9 | 24.6 | 5.5 | 50.3 | 26.1 | **28.0** |
+
+### Cityscapes-C long-term &mdash; mIoU (rounds 1, 5, 10)
+
+| Seed | R1 Fog | R1 Motion | R1 Snow | R1 Bright | R1 Defocus | R5 Fog | R5 Motion | R5 Snow | R5 Bright | R5 Defocus | R10 Fog | R10 Motion | R10 Snow | R10 Bright | R10 Defocus | Mean |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 42.6 | 35.4 | 10.3 | 40.1 | 31.0 | 49.6 | 39.6 | 10.9 | 51.6 | 37.9 | 47.8 | 38.6 | 15.0 | 52.9 | 35.6 | **37.0** |
+
+### ACDC long-term &mdash; mAP0.5 (rounds 1, 5, 10)
+
+| Seed | R1 Fog | R1 Night | R1 Rain | R1 Snow | R5 Fog | R5 Night | R5 Rain | R5 Snow | R10 Fog | R10 Night | R10 Rain | R10 Snow | Mean |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 55.7 | 17.0 | 36.9 | 42.4 | 62.8 | 24.2 | 44.1 | 49.1 | 63.0 | 26.3 | 44.8 | 50.2 | **44.1** |
+
+### ACDC long-term &mdash; mIoU (rounds 1, 5, 10)
+
+| Seed | R1 Fog | R1 Night | R1 Rain | R1 Snow | R5 Fog | R5 Night | R5 Rain | R5 Snow | R10 Fog | R10 Night | R10 Rain | R10 Snow | Mean |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 45.1 | 21.0 | 43.5 | 39.9 | 50.4 | 24.8 | 46.0 | 42.4 | 50.0 | 26.0 | 45.0 | 41.9 | **40.3** |
+<!-- sharedroute:end -->
+
 ## Reproducibility and caveats
 
 - **Run-to-run noise.** Adaptation is not deterministic: cuDNN uses non-deterministic convolution backward kernels, and 25k sequential self-training steps with hard pseudo-label thresholds amplify that. Two runs of the identical config and seed differ by up to **1.8 mAP0.5 on a single evaluation**. On the 50-evaluation mean the measured seed-to-seed standard deviation is **0.14-0.20 mAP0.5** and **0.13-0.16 mIoU** (n=3, E15 and S6), so the standard error on a difference between two three-seed arms is about **0.14 mAP0.5**. Treat single-seed differences below ~0.4 mAP0.5 as unresolved.

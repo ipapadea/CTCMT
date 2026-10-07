@@ -661,3 +661,12 @@ This finding will be reported in the paper as evidence that XVA components must 
 
 **CT-CMT-MTL + V2 + CTPV** = CT-CL + CT-CR + STR + CTPV, plus standard teacher-student plumbing. Delivers 37.43 AP50 / 34.42 mIoU on ACDC continual with sub-0.1 seed variance on the mean.
 
+## AdaCoTTA (ICT Express 2026) — paper analyzed, no code changes (2026-09-21)
+
+Full analysis in [papers/AdaCoTTA.md](papers/AdaCoTTA.md) (paper facts vs. repo facts vs. hypotheses, all tagged). Single-task seg-only CTTA method (SegFormer, no det branch) proposing three mean-teacher add-ons: CAPL (multi-view averaged pseudo-labels, confidence-gated), CAWL (per-pixel loss doubled/halved by confidence×loss thresholds), CALR (LR scaled by mean image confidence).
+
+Main integration candidates, priority order:
+1. **CAWL** — complements our class-balanced CE (different axis: confidence×loss vs class frequency); must route through existing `SCALE_PRESERVE` to avoid the known seg/det gradient-share confound.
+2. **CALR** — continuous confidence-scaled LR as a softer alternative to our binary score-EM gate; cheap, orthogonal.
+3. **CAPL** — no analog in our repo, highest engineering/compute cost (N extra teacher forward passes); deferred until the planned `CTCMT_DET_ONLY` shared-trunk negative-transfer control determines whether the CS-C detection plateau is architectural (in which case CAPL won't help).
+

@@ -50,6 +50,7 @@ RUN pip install \
         matplotlib==3.7.3 \
         tqdm==4.66.1 \
         cityscapesScripts==2.2.2 \
+        Shapely==2.0.5 \
         fvcore==0.1.5.post20221221 \
         iopath==0.1.9 \
         cloudpickle==3.0.0 \

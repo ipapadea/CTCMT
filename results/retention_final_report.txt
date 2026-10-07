@@ -1,0 +1,259 @@
+
+==============================================================================================================
+A. PAIRWISE: ISOLATED EFFECT ON FOG
+   delta = fog AFTER challenger - fog AFTER fog
+==============================================================================================================
+   method challenger  fog_before_AP50  fog_after_AP50  delta_AP50  fog_before_mIoU  fog_after_mIoU  delta_mIoU
+     Base     motion           42.111          43.629       1.518           43.531          44.321       0.791
+     Base       snow           41.643          42.677       1.034           43.542          43.653       0.110
+     Base brightness           42.184          43.497       1.313           43.574          44.311       0.737
+     Base    defocus           42.167          42.522       0.355           43.527          44.024       0.497
+ lambda=0     motion           43.978          46.433       2.455           44.803          46.234       1.431
+ lambda=0       snow           43.689          46.050       2.361           44.723          46.180       1.457
+ lambda=0 brightness           44.015          46.420       2.405           44.654          45.989       1.335
+ lambda=0    defocus           43.973          46.001       2.028           44.807          46.288       1.481
+ lambda=1     motion           41.884          44.122       2.239           43.903          44.879       0.976
+ lambda=1       snow           41.730          43.699       1.969           43.879          44.384       0.505
+ lambda=1 brightness           41.786          44.501       2.714           43.969          45.182       1.213
+ lambda=1    defocus           41.860          42.798       0.938           43.846          44.681       0.835
+Task-CoCo     motion           41.555          44.170       2.615           43.539          44.660       1.121
+Task-CoCo       snow           42.206          43.189       0.983           43.605          43.885       0.280
+Task-CoCo brightness           42.201          44.520       2.319           43.671          44.942       1.271
+Task-CoCo    defocus           42.172          43.483       1.311           43.686          44.658       0.972
+
+PAIRWISE ΔmIoU MATRIX
+challenger  brightness  defocus  motion   snow
+method                                        
+Base             0.737    0.497   0.791  0.110
+Task-CoCo        1.271    0.972   1.121  0.280
+lambda=0         1.335    1.481   1.431  1.457
+lambda=1         1.213    0.835   0.976  0.505
+
+PAIRWISE ΔAP50 MATRIX
+challenger  brightness  defocus  motion   snow
+method                                        
+Base             1.313    0.355   1.518  1.034
+Task-CoCo        2.319    1.311   2.615  0.983
+lambda=0         2.405    2.028   2.455  2.361
+lambda=1         2.714    0.938   2.239  1.969
+
+==============================================================================================================
+B. LONGITUDINAL: FROZEN FOG AFTER EVERY DOMAIN
+==============================================================================================================
+
+### Base
+ round  position adapted_dataset   AP50   mIoU  step_delta_AP50  step_delta_mIoU  delta_from_fog_AP50  delta_from_fog_mIoU
+     1         1             fog 42.260 43.571              NaN              NaN                0.000                0.000
+     1         2          motion 43.500 44.339            1.239            0.768                1.239                0.768
+     1         3            snow 43.425 42.881           -0.074           -1.458                1.165               -0.690
+     1         4      brightness 44.350 42.934            0.925            0.053                2.090               -0.637
+     1         5         defocus 44.197 43.042           -0.153            0.108                1.937               -0.530
+     2         1             fog 45.556 43.845              NaN              NaN                0.000                0.000
+     2         2          motion 45.710 43.907            0.154            0.062                0.154                0.062
+     2         3            snow 45.403 43.562           -0.307           -0.346               -0.152               -0.284
+     2         4      brightness 45.552 43.572            0.148            0.010               -0.004               -0.273
+     2         5         defocus 45.121 43.232           -0.431           -0.340               -0.435               -0.613
+     3         1             fog 45.574 43.699              NaN              NaN                0.000                0.000
+     3         2          motion 45.708 43.692            0.134           -0.007                0.134               -0.007
+     3         3            snow 45.687 43.408           -0.021           -0.284                0.113               -0.291
+     3         4      brightness 46.221 43.402            0.534           -0.005                0.647               -0.297
+     3         5         defocus 46.095 43.097           -0.126           -0.305                0.521               -0.602
+
+### lambda=0
+ round  position adapted_dataset   AP50   mIoU  step_delta_AP50  step_delta_mIoU  delta_from_fog_AP50  delta_from_fog_mIoU
+     1         1             fog 43.560 44.779              NaN              NaN                0.000                0.000
+     1         2          motion 46.386 46.298            2.827            1.519                2.827                1.519
+     1         3            snow 47.617 46.811            1.231            0.513                4.057                2.032
+     1         4      brightness 48.980 47.138            1.363            0.327                5.420                2.359
+     1         5         defocus 48.825 47.206           -0.155            0.068                5.265                2.427
+     2         1             fog 49.951 48.043              NaN              NaN                0.000                0.000
+     2         2          motion 50.523 48.150            0.572            0.107                0.572                0.107
+     2         3            snow 50.193 48.063           -0.330           -0.087                0.242                0.020
+     2         4      brightness 50.336 47.871            0.143           -0.192                0.385               -0.171
+     2         5         defocus 49.848 47.437           -0.488           -0.434               -0.104               -0.606
+     3         1             fog 50.434 47.844              NaN              NaN                0.000                0.000
+     3         2          motion 50.343 47.649           -0.091           -0.195               -0.091               -0.195
+     3         3            snow 49.239 47.442           -1.104           -0.207               -1.195               -0.402
+     3         4      brightness 49.508 47.373            0.269           -0.069               -0.926               -0.471
+     3         5         defocus 49.274 46.980           -0.234           -0.392               -1.160               -0.863
+
+### lambda=1
+ round  position adapted_dataset   AP50   mIoU  step_delta_AP50  step_delta_mIoU  delta_from_fog_AP50  delta_from_fog_mIoU
+     1         1             fog 41.690 43.885              NaN              NaN                0.000                0.000
+     1         2          motion 44.052 44.969            2.361            1.084                2.361                1.084
+     1         3            snow 44.248 44.209            0.197           -0.761                2.558                0.324
+     1         4      brightness 45.406 44.558            1.157            0.349                3.715                0.673
+     1         5         defocus 45.586 44.307            0.181           -0.250                3.896                0.423
+     2         1             fog 46.676 45.144              NaN              NaN                0.000                0.000
+     2         2          motion 46.958 45.050            0.282           -0.094                0.282               -0.094
+     2         3            snow 47.065 44.632            0.107           -0.418                0.390               -0.513
+     2         4      brightness 47.428 44.625            0.363           -0.007                0.752               -0.519
+     2         5         defocus 47.212 44.118           -0.216           -0.507                0.537               -1.026
+     3         1             fog 47.228 44.589              NaN              NaN                0.000                0.000
+     3         2          motion 47.609 44.328            0.381           -0.261                0.381               -0.261
+     3         3            snow 47.386 43.591           -0.223           -0.737                0.157               -0.998
+     3         4      brightness 47.997 43.458            0.611           -0.132                0.768               -1.131
+     3         5         defocus 47.544 42.765           -0.453           -0.694                0.315               -1.824
+
+### Task-CoCo
+ round  position adapted_dataset   AP50   mIoU  step_delta_AP50  step_delta_mIoU  delta_from_fog_AP50  delta_from_fog_mIoU
+     1         1             fog 42.254 43.654              NaN              NaN                0.000                0.000
+     1         2          motion 44.102 44.508            1.848            0.853                1.848                0.853
+     1         3            snow 44.557 44.079            0.455           -0.429                2.303                0.425
+     1         4      brightness 44.936 44.176            0.380            0.097                2.682                0.522
+     1         5         defocus 44.895 44.019           -0.042           -0.157                2.641                0.365
+     2         1             fog 46.158 44.725              NaN              NaN                0.000                0.000
+     2         2          motion 46.159 44.697            0.001           -0.028                0.001               -0.028
+     2         3            snow 45.774 44.360           -0.385           -0.337               -0.383               -0.365
+     2         4      brightness 46.100 44.378            0.325            0.018               -0.058               -0.347
+     2         5         defocus 46.177 44.054            0.077           -0.324                0.019               -0.671
+     3         1             fog 47.211 44.414              NaN              NaN                0.000                0.000
+     3         2          motion 47.373 44.183            0.161           -0.232                0.161               -0.232
+     3         3            snow 47.308 43.683           -0.065           -0.500                0.097               -0.731
+     3         4      brightness 47.821 43.533            0.513           -0.150                0.610               -0.881
+     3         5         defocus 47.396 42.803           -0.425           -0.730                0.185               -1.611
+
+==============================================================================================================
+C. FOG mIoU TRAJECTORY BY ROUND
+==============================================================================================================
+   method  round    fog  motion   snow  brightness  defocus  fog_to_end
+     Base      1 43.571  44.339 42.881      42.934   43.042      -0.530
+     Base      2 43.845  43.907 43.562      43.572   43.232      -0.613
+     Base      3 43.699  43.692 43.408      43.402   43.097      -0.602
+ lambda=0      1 44.779  46.298 46.811      47.138   47.206       2.427
+ lambda=0      2 48.043  48.150 48.063      47.871   47.437      -0.606
+ lambda=0      3 47.844  47.649 47.442      47.373   46.980      -0.863
+ lambda=1      1 43.885  44.969 44.209      44.558   44.307       0.423
+ lambda=1      2 45.144  45.050 44.632      44.625   44.118      -1.026
+ lambda=1      3 44.589  44.328 43.591      43.458   42.765      -1.824
+Task-CoCo      1 43.654  44.508 44.079      44.176   44.019       0.365
+Task-CoCo      2 44.725  44.697 44.360      44.378   44.054      -0.671
+Task-CoCo      3 44.414  44.183 43.683      43.533   42.803      -1.611
+
+==============================================================================================================
+D. LONGITUDINAL INCREMENTAL TRANSITION EFFECTS ON FOG mIoU
+==============================================================================================================
+   method  round                  transition  step_delta_AP50  step_delta_mIoU
+     Base      1         fog_state -> motion            1.239            0.768
+     Base      1        motion_state -> snow           -0.074           -1.458
+     Base      1    snow_state -> brightness            0.925            0.053
+     Base      1 brightness_state -> defocus           -0.153            0.108
+     Base      2         fog_state -> motion            0.154            0.062
+     Base      2        motion_state -> snow           -0.307           -0.346
+     Base      2    snow_state -> brightness            0.148            0.010
+     Base      2 brightness_state -> defocus           -0.431           -0.340
+     Base      3         fog_state -> motion            0.134           -0.007
+     Base      3        motion_state -> snow           -0.021           -0.284
+     Base      3    snow_state -> brightness            0.534           -0.005
+     Base      3 brightness_state -> defocus           -0.126           -0.305
+ lambda=0      1         fog_state -> motion            2.827            1.519
+ lambda=0      1        motion_state -> snow            1.231            0.513
+ lambda=0      1    snow_state -> brightness            1.363            0.327
+ lambda=0      1 brightness_state -> defocus           -0.155            0.068
+ lambda=0      2         fog_state -> motion            0.572            0.107
+ lambda=0      2        motion_state -> snow           -0.330           -0.087
+ lambda=0      2    snow_state -> brightness            0.143           -0.192
+ lambda=0      2 brightness_state -> defocus           -0.488           -0.434
+ lambda=0      3         fog_state -> motion           -0.091           -0.195
+ lambda=0      3        motion_state -> snow           -1.104           -0.207
+ lambda=0      3    snow_state -> brightness            0.269           -0.069
+ lambda=0      3 brightness_state -> defocus           -0.234           -0.392
+ lambda=1      1         fog_state -> motion            2.361            1.084
+ lambda=1      1        motion_state -> snow            0.197           -0.761
+ lambda=1      1    snow_state -> brightness            1.157            0.349
+ lambda=1      1 brightness_state -> defocus            0.181           -0.250
+ lambda=1      2         fog_state -> motion            0.282           -0.094
+ lambda=1      2        motion_state -> snow            0.107           -0.418
+ lambda=1      2    snow_state -> brightness            0.363           -0.007
+ lambda=1      2 brightness_state -> defocus           -0.216           -0.507
+ lambda=1      3         fog_state -> motion            0.381           -0.261
+ lambda=1      3        motion_state -> snow           -0.223           -0.737
+ lambda=1      3    snow_state -> brightness            0.611           -0.132
+ lambda=1      3 brightness_state -> defocus           -0.453           -0.694
+Task-CoCo      1         fog_state -> motion            1.848            0.853
+Task-CoCo      1        motion_state -> snow            0.455           -0.429
+Task-CoCo      1    snow_state -> brightness            0.380            0.097
+Task-CoCo      1 brightness_state -> defocus           -0.042           -0.157
+Task-CoCo      2         fog_state -> motion            0.001           -0.028
+Task-CoCo      2        motion_state -> snow           -0.385           -0.337
+Task-CoCo      2    snow_state -> brightness            0.325            0.018
+Task-CoCo      2 brightness_state -> defocus            0.077           -0.324
+Task-CoCo      3         fog_state -> motion            0.161           -0.232
+Task-CoCo      3        motion_state -> snow           -0.065           -0.500
+Task-CoCo      3    snow_state -> brightness            0.513           -0.150
+Task-CoCo      3 brightness_state -> defocus           -0.425           -0.730
+
+==============================================================================================================
+E. MEAN LONGITUDINAL TRANSITION EFFECT ACROSS R1-R3
+==============================================================================================================
+   method adapted_dataset  mean_delta_AP50  mean_delta_mIoU  min_delta_mIoU  max_delta_mIoU
+     Base      brightness            0.536            0.019          -0.005           0.053
+     Base         defocus           -0.237           -0.179          -0.340           0.108
+     Base          motion            0.509            0.274          -0.007           0.768
+     Base            snow           -0.134           -0.696          -1.458          -0.284
+ lambda=0      brightness            0.592            0.022          -0.192           0.327
+ lambda=0         defocus           -0.292           -0.253          -0.434           0.068
+ lambda=0          motion            1.103            0.477          -0.195           1.519
+ lambda=0            snow           -0.068            0.073          -0.207           0.513
+ lambda=1      brightness            0.710            0.070          -0.132           0.349
+ lambda=1         defocus           -0.163           -0.484          -0.694          -0.250
+ lambda=1          motion            1.008            0.243          -0.261           1.084
+ lambda=1            snow            0.027           -0.639          -0.761          -0.418
+Task-CoCo      brightness            0.406           -0.012          -0.150           0.097
+Task-CoCo         defocus           -0.130           -0.404          -0.730          -0.157
+Task-CoCo          motion            0.670            0.198          -0.232           0.853
+Task-CoCo            snow            0.002           -0.422          -0.500          -0.337
+
+==============================================================================================================
+F. FROZEN 5-DOMAIN RETENTION AT END OF EACH ROUND
+==============================================================================================================
+   method  round  frozen_mean_AP50  frozen_mean_mIoU
+     Base      1            19.934            32.010
+     Base      2            22.312            33.170
+     Base      3            24.017            33.882
+ lambda=0      1            22.407            33.537
+ lambda=0      2            25.485            35.001
+ lambda=0      3            27.304            35.627
+ lambda=1      1            21.472            33.232
+ lambda=1      2            24.027            34.222
+ lambda=1      3            26.317            34.457
+Task-CoCo      1            20.049            32.209
+Task-CoCo      2            22.949            33.480
+Task-CoCo      3            24.656            33.785
+
+==============================================================================================================
+G. R3 FINAL FROZEN STATE -- ALL DOMAINS
+==============================================================================================================
+   method    dataset   AP50   mIoU
+     Base        fog 46.095 43.097
+     Base     motion 18.724 38.692
+     Base       snow  0.518 10.594
+     Base brightness 38.794 43.137
+     Base    defocus 15.952 33.891
+ lambda=0        fog 49.274 46.980
+ lambda=0     motion 20.711 38.390
+ lambda=0       snow  0.736 10.640
+ lambda=0 brightness 46.219 47.546
+ lambda=0    defocus 19.579 34.580
+ lambda=1        fog 47.544 42.765
+ lambda=1     motion 21.063 38.335
+ lambda=1       snow  1.017 11.383
+ lambda=1 brightness 42.732 44.853
+ lambda=1    defocus 19.227 34.951
+Task-CoCo        fog 47.396 42.803
+Task-CoCo     motion 17.881 37.849
+Task-CoCo       snow  0.752 11.290
+Task-CoCo brightness 40.778 42.799
+Task-CoCo    defocus 16.472 34.184
+
+==============================================================================================================
+H. CUMULATIVE FOG RETENTION
+==============================================================================================================
+   method  R1_after_fog_AP50  R1_end_AP50  R3_end_AP50  R1_after_fog_mIoU  R1_end_mIoU  R3_end_mIoU  within_R1_delta_mIoU  cumulative_R1start_to_R3end_mIoU
+     Base             42.260       44.197       46.095             43.571       43.042       43.097                -0.530                            -0.474
+ lambda=0             43.560       48.825       49.274             44.779       47.206       46.980                 2.427                             2.201
+ lambda=1             41.690       45.586       47.544             43.885       44.307       42.765                 0.423                            -1.120
+Task-CoCo             42.254       44.895       47.396             43.654       44.019       42.803                 0.365                            -0.851
+
+Saved everything to:
+/media/ilias/DATA/ilias/AMROD/results/retention_final

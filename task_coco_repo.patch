@@ -1,0 +1,330 @@
+--- a/detectron2/detectron2/modeling/meta_arch/ctcmt_mtl.py
++++ b/detectron2/detectron2/modeling/meta_arch/ctcmt_mtl.py
+@@ -90,6 +90,7 @@
+     "dyn_weight",
+     "aux_head_only",
+     "resnet_route",
++    "task_coco",
+ )
+ 
+ # =====================================================================
+@@ -420,6 +421,28 @@
+                 f"expected one of {sorted(_VALID_CONFLICT_MODES)}"
+             )
+         self.cagrad_alpha = float(getattr(cfg.SOLVER, "CTCMT_CAGRAD_ALPHA", 0.5))
++
++        # Task-CoCo: official CoCo-MT-TTA Gradient Consensus defaults.
++        # Adapted from leafheavy/MT-TTA/GradientConsensus.py (MIT License,
++        # Copyright (c) 2025 leafheavy).  These defaults intentionally mirror
++        # the official implementation: GC_c=0.5, 100 Adam iterations, lr=1.0,
++        # eps=1e-4, Adam betas=(0.9,0.999), weight_decay=1e-4.
++        #
++        # Only the Gradient Consensus component is used here.  CoCo's separate
++        # Fisher/Plasticity Constraint is NOT enabled in this ablation.
++        self.task_coco_gc_c = float(
++            getattr(cfg.SOLVER, "CTCMT_TASK_COCO_GC_C", 0.5)
++        )
++        self.task_coco_iters = max(int(
++            getattr(cfg.SOLVER, "CTCMT_TASK_COCO_ITERS", 100)
++        ), 1)
++        self.task_coco_lr = float(
++            getattr(cfg.SOLVER, "CTCMT_TASK_COCO_LR", 1.0)
++        )
++        self.task_coco_eps = float(
++            getattr(cfg.SOLVER, "CTCMT_TASK_COCO_EPS", 1e-4)
++        )
++
+         self.freeze_shared_trunk = bool(
+             getattr(cfg.SOLVER, "CTCMT_FREEZE_SHARED_TRUNK", False)
+         )
+@@ -458,6 +481,7 @@
+         self._conflict_stats = {
+             "steps": 0, "both": 0, "conflicts": 0, "projected": 0,
+             "cos_sum": 0.0, "gamma_sum": 0.0, "w_det_sum": 0.0,
++            "w_seg_sum": 0.0, "c_det_sum": 0.0, "c_seg_sum": 0.0,
+         }
+         self._grad_fallbacks = 0
+         # How often the conditional CoTTA-style aug-averaging actually fired.
+@@ -1124,12 +1148,238 @@
+             for k, v in acc.items()
+         }
+ 
++    @staticmethod
++    def _task_coco_consensus_coeffs(
++        g11: float,
++        g12: float,
++        g22: float,
++        gc_c: float = 0.5,
++        iters: int = 100,
++        lr_default: float = 1.0,
++        eps: float = 1e-4,
++    ):
++        """Return official CoCo Gradient-Consensus coefficients for two tasks.
++
++        This is a memory-efficient port of leafheavy/MT-TTA's official
++        ``GradientConsensus.gradient_consensus`` implementation.  The official
++        code first flattens every task gradient and builds ``GG = grads @ grads.T``.
++        Here the caller already provides that exact 2x2 Gram matrix through
++        ``g11=<g_det,g_det>``, ``g12=<g_det,g_seg>``, ``g22=<g_seg,g_seg>``.
++
++        The optimization itself intentionally mirrors the official repository:
++          * mean gradient g0 through row/overall means of the normalized Gram;
++          * softmax task weights optimized with Adam for 100 iterations by default;
++          * objective ``<g_w,g_0> + phi * ||g_w||``;
++          * final *unscaled* direction used by the released code.
++
++        Returns
++        -------
++        c_det, c_seg, w_det, w_seg
++            ``g_GC = c_det * g_det + c_seg * g_seg`` on shared parameters,
++            while ``w_*`` are the simplex weights optimized by CoCo.
++        """
++        # The official implementation moves the tiny task Gram matrix to CPU
++        # for the weight search.  Keeping this 2x2 optimization on CPU also
++        # avoids retaining/flattening a second copy of the full backbone grads.
++        GG = torch.tensor(
++            [[g11, g12], [g12, g22]],
++            dtype=torch.float32,
++            device="cpu",
++        )
++        scale = (torch.diag(GG) + eps).sqrt().mean()
++        GG = GG / scale.pow(2)
++
++        Gg = GG.mean(1, keepdim=True)
++        gg = Gg.mean(0, keepdim=True)
++
++        w = torch.zeros(2, 1, requires_grad=True, device="cpu")
++        w_opt = torch.optim.Adam(
++            [w], lr=lr_default, betas=(0.9, 0.999), weight_decay=1e-4
++        )
++        phi_sqrt = (gg + eps).sqrt() * gc_c
++
++        w_best = None
++        obj_best = float("inf")
++        for i in range(iters):
++            w_opt.zero_grad()
++            ww = torch.softmax(w, 0)
++            term1 = ww.t().mm(Gg)
++            term2 = (ww.t().mm(GG).mm(ww) + eps).sqrt()
++            obj = term1 + phi_sqrt * term2
++
++            obj_scalar = float(obj.item())
++            if obj_scalar < obj_best:
++                obj_best = obj_scalar
++                w_best = w.detach().clone()
++            if i < iters - 1:
++                obj.backward()
++                w_opt.step()
++
++        ww = torch.softmax(w_best, 0)
++        gw_norm = (ww.t().mm(GG).mm(ww) + eps).sqrt()
++        lambda_frac = phi_sqrt.view(-1) / (gw_norm + eps)
++
++        # This matches the released CoCo code exactly: the optional
++        # /(1 + GC_c**2) scaling is commented out in GradientConsensus.py.
++        coeffs = 0.5 + ww.view(-1) * lambda_frac.reshape(())
++        return (
++            float(coeffs[0].item()),
++            float(coeffs[1].item()),
++            float(ww[0].item()),
++            float(ww[1].item()),
++        )
++
++    def _backward_task_coco(self, loss_dict):
++        """Task-level CoCo consensus for detection vs semantic segmentation.
++
++        The existing CT-CMT/CT-CR formulation is left untouched.  Only the
++        *task* gradients on the shared Panoptic-FPN backbone are reconciled:
++
++            g_det = d L_det / d theta_shared
++            g_seg = d L_seg / d theta_shared
++            g_shared = CoCo(g_det, g_seg) + g_regularizers
++
++        where ``g_regularizers`` contains CT-CR, CT-CL, prototype loss, etc.
++        Those cross-task/auxiliary terms keep their native full gradients and
++        are deliberately NOT folded into ``g_seg``.  Task-specific heads also
++        keep their native gradients; CoCo is applied only to ``backbone.*``
++        (ResNet bottom-up + FPN), the parameters shared by both tasks.
++
++        If either task loss is absent on a gated/empty-pseudo step, there is no
++        two-task consensus problem and we fall back to the unchanged joint
++        backward for that step.
++        """
++        diag = {}
++        groups = {}
++        for k, v in loss_dict.items():
++            group = k.split("/")[0]
++            groups[group] = v if group not in groups else groups[group] + v
++
++        det_loss = groups.get("det")
++        seg_loss = groups.get("seg")
++        reg_keys = sorted(k for k in groups if k not in ("det", "seg"))
++
++        # Faithful task-level consensus requires both task objectives.
++        if (
++            det_loss is None
++            or seg_loss is None
++            or not det_loss.requires_grad
++            or not seg_loss.requires_grad
++        ):
++            total = sum(loss_dict.values())
++            if total.requires_grad:
++                total.backward()
++            diag["task_coco_active"] = False
++            return diag
++
++        self._ensure_param_index()
++
++        passes = [("det", det_loss), ("seg", seg_loss)]
++        if reg_keys:
++            reg_loss = sum(groups[k] for k in reg_keys)
++            if reg_loss.requires_grad:
++                passes.append(("reg", reg_loss))
++
++        grads = {}
++        for i, (name, loss) in enumerate(passes):
++            loss.backward(retain_graph=(i < len(passes) - 1))
++            grads[name] = self._snapshot_grads()
++
++        g_det = grads["det"]
++        g_seg = grads["seg"]
++        g_reg = grads.get("reg", {})
++
++        gdd = self._shared_dot(g_det, g_det)
++        gds = self._shared_dot(g_det, g_seg)
++        gss = self._shared_dot(g_seg, g_seg)
++        nd = math.sqrt(max(gdd, 0.0))
++        ns = math.sqrt(max(gss, 0.0))
++        cos = gds / (nd * ns + 1e-12)
++        conflict = gds < 0.0
++
++        # Degenerate shared gradient: preserve the native update instead of
++        # feeding an ill-defined task into the consensus search.
++        if gdd <= 1e-24 or gss <= 1e-24:
++            c_det = c_seg = 1.0
++            w_det = w_seg = 0.5
++            consensus_applied = False
++        else:
++            c_det, c_seg, w_det, w_seg = self._task_coco_consensus_coeffs(
++                gdd,
++                gds,
++                gss,
++                gc_c=self.task_coco_gc_c,
++                iters=self.task_coco_iters,
++                lr_default=self.task_coco_lr,
++                eps=self.task_coco_eps,
++            )
++            consensus_applied = True
++
++        nr = math.sqrt(max(self._shared_dot(g_reg, g_reg), 0.0)) if g_reg else 0.0
++        diag.update({
++            "task_coco_active": consensus_applied,
++            "cos": cos,
++            "conflict": conflict,
++            "g_det": nd,
++            "g_seg": ns,
++            "g_reg": nr,
++            "w_det": w_det,
++            "w_seg": w_seg,
++            "c_det": c_det,
++            "c_seg": c_seg,
++            "gc_c": self.task_coco_gc_c,
++        })
++
++        # CoCo changes only the two native task gradients on the shared
++        # representation.  Cross-task regularizers (especially CT-CR) stay
++        # exactly as they were: coefficient 1.0 everywhere they naturally flow.
++        for n, p in self._param_index:
++            gd = g_det.get(n)
++            gs = g_seg.get(n)
++            gr = g_reg.get(n)
++
++            if gd is None and gs is None and gr is None:
++                p.grad = None
++                continue
++
++            out = torch.zeros_like(p)
++            if n in self._shared_set:
++                if gd is not None:
++                    out.add_(gd, alpha=c_det)
++                if gs is not None:
++                    out.add_(gs, alpha=c_seg)
++            else:
++                # Task-specific heads: native task gradients, no CoCo surgery.
++                if gd is not None:
++                    out.add_(gd)
++                if gs is not None:
++                    out.add_(gs)
++
++            if gr is not None:
++                out.add_(gr)
++            p.grad = out
++
++        s = self._conflict_stats
++        s["steps"] += 1
++        s["both"] += 1
++        s["conflicts"] += int(conflict)
++        s["projected"] += int(consensus_applied)
++        s["cos_sum"] += cos
++        s["w_det_sum"] += w_det
++        s["w_seg_sum"] += w_seg
++        s["c_det_sum"] += c_det
++        s["c_seg_sum"] += c_seg
++        return diag
++
+     def _backward_and_combine(self, loss_dict):
+         """Backward pass(es) + shared-trunk gradient combination.
+ 
+         On return the student's ``.grad`` fields hold exactly what the optimizer
+         should apply. Returns a diagnostics dict (logging only).
+         """
++        if self.conflict_mode == "task_coco":
++            return self._backward_task_coco(loss_dict)
++
+         diag = {}
+         groups = {}
+         for k, v in loss_dict.items():
+@@ -2192,7 +2442,29 @@
+             s = self._conflict_stats
+             if s["both"] > 0:
+                 n = s["both"]
+-                print(f"[CT-CMT-GRAD] iter={self.iter} mode={self.conflict_mode} "
++                if self.conflict_mode == "task_coco":
++                    print(
++                        f"[CT-CMT-COCO] iter={self.iter} "
++                        f"cos_det_seg={grad_diag.get('cos', float('nan')):.4f} "
++                        f"cos_mean={s['cos_sum'] / n:.4f} "
++                        f"conflict_rate={s['conflicts'] / n:.4f} "
++                        f"g_det={grad_diag.get('g_det', float('nan')):.5f} "
++                        f"g_seg={grad_diag.get('g_seg', float('nan')):.5f} "
++                        f"g_reg={grad_diag.get('g_reg', float('nan')):.5f} "
++                        f"w_det={grad_diag.get('w_det', float('nan')):.4f} "
++                        f"w_seg={grad_diag.get('w_seg', float('nan')):.4f} "
++                        f"c_det={grad_diag.get('c_det', float('nan')):.4f} "
++                        f"c_seg={grad_diag.get('c_seg', float('nan')):.4f} "
++                        f"w_det_mean={s['w_det_sum'] / n:.4f} "
++                        f"w_seg_mean={s['w_seg_sum'] / n:.4f} "
++                        f"c_det_mean={s['c_det_sum'] / n:.4f} "
++                        f"c_seg_mean={s['c_seg_sum'] / n:.4f} "
++                        f"GC_c={self.task_coco_gc_c:.3f} "
++                        f"fallbacks={self._grad_fallbacks} "
++                        f"n_steps={n}"
++                    )
++                else:
++                    print(f"[CT-CMT-GRAD] iter={self.iter} mode={self.conflict_mode} "
+                       f"cos={grad_diag.get('cos', float('nan')):.4f} "
+                       f"cos_mean={s['cos_sum'] / n:.4f} "
+                       f"conflict_rate={s['conflicts'] / n:.4f} "
+@@ -2209,9 +2481,9 @@
+                       f"gamma={grad_diag.get('gamma', float('nan')):.4f} "
+                       f"gamma_mean={s['gamma_sum'] / n:.4f} "
+                       f"w_det={grad_diag.get('w_det', float('nan')):.4f} "
+-                      f"w_det_mean={s['w_det_sum'] / n:.4f} "
+-                      f"fallbacks={self._grad_fallbacks} "
+-                      f"n_steps={n}")
++                          f"w_det_mean={s['w_det_sum'] / n:.4f} "
++                          f"fallbacks={self._grad_fallbacks} "
++                          f"n_steps={n}")
+         if grad_diag and any(k.startswith("cos_det_") for k in grad_diag):
+             comps = " ".join(
+                 f"{k}={grad_diag[k]:.4f}" for k in sorted(grad_diag) if k.startswith("cos_det_")

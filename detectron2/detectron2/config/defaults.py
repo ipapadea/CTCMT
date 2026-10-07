@@ -694,6 +694,31 @@ _C.SOLVER.CTCMT_ADAPTIVE_ROUTING_EMA = 0.99
 _C.SOLVER.CTCMT_GRAD_DIAG = False
 _C.SOLVER.CTCMT_GRAD_DIAG_EVERY = 50
 
+# Which shared parameters the conflict-mode coefficient applies to.
+# "shared" is every backbone parameter (the historical behaviour); "fpn"
+# restricts routing to the FPN, where the 2026-09-21 diagnostics put the
+# det/aux conflict (block cos 0.02, 28% negative, against 0.13-0.23 and
+# 11-15% for res3/res4/res5).
+_C.SOLVER.CTCMT_ROUTE_SCOPE = "shared"
+
+# --- Detector-dominant CT-CR (from the 2026-09-21 prior diagnostics) ---
+# CT-CR writes one box at a time into a shared target map, and detections
+# arrive score-DESCENDING, so the LOWEST-scoring box currently wins an
+# overlap. Iterate ascending instead, so the most confident box wins.
+_C.SOLVER.CTCMT_CTCR_SCORE_ORDER = False
+# Scale each box's CT-CR contribution by det_score ** gamma. Measured box
+# purity rises 0.36 -> 0.74 from score 0.7 to 0.9, yet every box currently
+# contributes equally.
+_C.SOLVER.CTCMT_CTCR_DET_SCORE_WEIGHT = False
+_C.SOLVER.CTCMT_CTCR_DET_SCORE_GAMMA = 1.0
+
+# Inverted CTPV: instead of letting segmentation veto detections, let a
+# confident detection suppress the segmentation soft-CE on the pixels inside
+# its box where the segmentation teacher disagrees with the mapped class.
+_C.SOLVER.CTCMT_SEG_DET_VETO = False
+_C.SOLVER.CTCMT_SEG_DET_VETO_SCORE = 0.9
+_C.SOLVER.CTCMT_SEG_DET_VETO_WEIGHT = 0.0
+
 # Options: WarmupMultiStepLR, WarmupCosineLR.
 # See detectron2/solver/build.py for definition.
 _C.SOLVER.LR_SCHEDULER_NAME = "WarmupMultiStepLR"
