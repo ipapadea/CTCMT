@@ -131,7 +131,7 @@ def main(args):
         # match the prefixed keys and empirically resets FrozenBN buffers on
         # this fork, silently ruining eval.
         _SELF_LOADING = {"AMROD", "CoTTA_SemSeg", "CTCMT_MTL", "CTCMT_Seg", "TENT_SemSeg",
-                         "CTAOD_Yoo", "OBAO_SemSeg"}
+                         "CTAOD_Yoo", "OBAO_SemSeg", "DATPFN"}
         if cfg.MODEL.META_ARCHITECTURE not in _SELF_LOADING:
             DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
                 cfg.MODEL.WEIGHTS, resume=args.resume
