@@ -148,5 +148,50 @@ class TestScorer(unittest.TestCase):
         self.assertEqual(online["acdc_night_semseg"]["pACC"], 60.8469)
 
 
+    def test_repeated_domains_do_not_overwrite_each_other(self):
+        # long-term stream: A B A B, each domain scored on its own frames, in stream order
+        ra, ga, pa = _make_dataset(self.root, "fake_lt_a", 3, 10)
+        rb, gb, pb = _make_dataset(self.root, "fake_lt_b", 2, 11)
+        # second visit of the same dataset sees the same records but different predictions
+        pa2 = [(p + 3) % C for p in pa]
+        pb2 = [(p + 5) % C for p in pb]
+        run = os.path.join(self.root, "run")
+        _write_run(run, ra + rb + ra + rb, pa + pb + pa2 + pb2)
+        specs = [("fake_lt_a", None), ("fake_lt_b", None), ("fake_lt_a", None), ("fake_lt_b", None)]
+        self.assertEqual(scorer.spec_keys(specs), ["000_fake_lt_a", "001_fake_lt_b", "002_fake_lt_a", "003_fake_lt_b"])
+        res = scorer.score_run(run, specs)["primary"]
+        self.assertEqual(list(res), ["000_fake_lt_a", "001_fake_lt_b", "002_fake_lt_a", "003_fake_lt_b"])
+        self.assertAlmostEqual(res["000_fake_lt_a"]["mIoU"], _numpy_miou(ga, pa), places=6)
+        self.assertAlmostEqual(res["002_fake_lt_a"]["mIoU"], _numpy_miou(ga, pa2), places=6)
+        self.assertAlmostEqual(res["003_fake_lt_b"]["mIoU"], _numpy_miou(gb, pb2), places=6)
+        self.assertNotAlmostEqual(res["000_fake_lt_a"]["mIoU"], res["002_fake_lt_a"]["mIoU"], places=3)
+        self.assertTrue(all(r["name"].startswith("fake_lt_") for r in res.values()))
+
+    def test_online_log_parser_keeps_repeated_datasets_in_order(self):
+        block = (
+            "[x d2.engine.defaults]: Evaluation results for {n} in csv format:\n"
+            "[x d2.evaluation.testing]: copypaste: Task: sem_seg\n"
+            "[x d2.evaluation.testing]: copypaste: mIoU,fwIoU,mACC,pACC\n"
+            "[x d2.evaluation.testing]: copypaste: {v}\n"
+        )
+        text = block.format(n="fog_semseg", v="1.0000,2.0000,3.0000,4.0000") + block.format(
+            n="snow_semseg", v="5.0000,6.0000,7.0000,8.0000") + block.format(n="fog_semseg", v="9.0000,9.5000,9.7000,9.9000")
+        path = os.path.join(self.root, "lt.log")
+        open(path, "w").write(text)
+        self.assertEqual([n for n, _ in scorer.parse_online_log_list(path)], ["fog_semseg", "snow_semseg", "fog_semseg"])
+        keyed = scorer.parse_online_log(path)
+        # same rule as spec_keys: plain name when unique in the stream, positional when repeated
+        self.assertEqual(list(keyed), ["000_fog_semseg", "snow_semseg", "002_fog_semseg"])
+        self.assertEqual(keyed["002_fog_semseg"]["mIoU"], 9.0)
+
+    def test_parity_requires_every_offline_entry_to_be_matched(self):
+        offline = {"000_a": {"name": "a", "frames_expected": 3, "mIoU": 1.0, "fwIoU": 2.0, "mACC": 3.0, "pACC": 4.0},
+                   "001_b": {"name": "b", "frames_expected": 3, "mIoU": 1.0, "fwIoU": 2.0, "mACC": 3.0, "pACC": 4.0}}
+        online = {"000_a": {"mIoU": 1.0, "fwIoU": 2.0, "mACC": 3.0, "pACC": 4.0}}
+        worst, detail = scorer.compare_online(offline, online)
+        self.assertEqual(worst, 0.0)
+        self.assertEqual(len(detail), 1)  # the caller treats len(detail) != len(offline) as DISAGREE
+
+
 if __name__ == "__main__":
     unittest.main()

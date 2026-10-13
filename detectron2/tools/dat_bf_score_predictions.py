@@ -53,12 +53,25 @@ def read_frame_log(run_dir):
         return [json.loads(line) for line in f if line.strip()]
 
 
+def spec_keys(specs):
+    """Result keys: the dataset name when it occurs once in the stream, else ``NNN_<name>`` (stream
+    position, so repeated domains in long-term streams never overwrite each other)."""
+    counts = {}
+    for name, _ in specs:
+        counts[name] = counts.get(name, 0) + 1
+    return [name if counts[name] == 1 else f"{i:03d}_{name}" for i, (name, _) in enumerate(specs)]
+
+
 def score_run(run_dir, specs, tags=TAGS):
     log = read_frame_log(run_dir)
     results = {tag: {} for tag in tags}
     offset = 0
-    for name, limit in specs:
-        records = DatasetCatalog.get(name)
+    keys = spec_keys(specs)
+    cache = {}
+    for key, (name, limit) in zip(keys, specs):
+        if name not in cache:
+            cache[name] = DatasetCatalog.get(name)
+        records = cache[name]
         if limit is not None:
             records = records[:limit]
         n_avail = max(0, min(len(records), len(log) - offset))
@@ -81,7 +94,8 @@ def score_run(run_dir, specs, tags=TAGS):
                 ev.process([{"file_name": rec["file_name"]}], [{"sem_seg": _LabelMap(np.array(Image.open(png)))}])
                 scored += 1
             res = ev.evaluate()["sem_seg"] if scored else {}
-            results[tag][name] = {
+            results[tag][key] = {
+                "name": name,
                 "frames_scored": scored,
                 "frames_expected": len(records),
                 "complete": scored == len(records),
@@ -98,6 +112,8 @@ def compare_online(offline_primary, online):
     for name, off in offline_primary.items():
         # truncated smoke datasets are evaluated online as "<name>_first<N>"
         on = online.get(name) or online.get(f"{name}_first{off['frames_expected']}")
+        if on is None and "name" in off:
+            on = online.get(f"{off['name']}_first{off['frames_expected']}")
         if on is None:
             continue
         on = on.get("sem_seg", on)
@@ -107,10 +123,11 @@ def compare_online(offline_primary, online):
     return worst, detail
 
 
-def parse_online_log(path):
-    """Per-dataset online metrics (4 decimals) from the 'copypaste' lines of a run log."""
+def parse_online_log_list(path):
+    """Ordered [(dataset, metrics)] (4 decimals) from the 'copypaste' lines of a run log, one entry per
+    evaluation in stream order (repeated datasets are kept)."""
     text = open(path, errors="ignore").read()
-    online = {}
+    out = []
     pattern = re.compile(
         r"Evaluation results for (\S+) in csv format:.*?copypaste: Task: sem_seg\s*\n.*?"
         r"copypaste: mIoU,fwIoU,mACC,pACC\s*\n.*?copypaste: ([0-9.,\-naninf]+)",
@@ -118,8 +135,17 @@ def parse_online_log(path):
     )
     for m in pattern.finditer(text):
         vals = [float(v) for v in m.group(2).split(",")]
-        online[m.group(1)] = dict(zip(METRIC_KEYS, vals))
-    return online
+        out.append((m.group(1), dict(zip(METRIC_KEYS, vals))))
+    return out
+
+
+def parse_online_log(path):
+    """Per-dataset online metrics; for repeated datasets the keys follow :func:`spec_keys`."""
+    ordered = parse_online_log_list(path)
+    counts = {}
+    for name, _ in ordered:
+        counts[name] = counts.get(name, 0) + 1
+    return {(name if counts[name] == 1 else f"{i:03d}_{name}"): vals for i, (name, vals) in enumerate(ordered)}
 
 
 def main():
@@ -144,7 +170,7 @@ def main():
         if not path:
             continue
         worst, detail = compare_online(results["primary"], loader(path))
-        ok = worst <= tol and bool(detail)
+        ok = worst <= tol and len(detail) == len(results["primary"])  # every offline entry must be matched
         report[f"parity_{src}"] = {"max_abs_diff": worst, "tolerance": tol, "agree": ok, "detail": detail}
         status |= 0 if ok else 1
     with open(out_path, "w") as f:

@@ -6,6 +6,8 @@ set -Eeuo pipefail
 #   bash scripts/dat_bf_run.sh smoke GPU csc12_defocus_first100        # first 100 frames of CSC12 defocus_blur
 #   bash scripts/dat_bf_run.sh full  GPU newsrc_dat_bf_csc12_s0 CSC12 0
 #   bash scripts/dat_bf_run.sh full  GPU newsrc_dat_bf_acdc4_s0 ACDC4 0
+#   bash scripts/dat_bf_run.sh full  GPU newsrc_dat_bf_cscLT_s0  CSCLT 0   # (fog,motion_blur,snow,brightness,defocus_blur) x10
+#   bash scripts/dat_bf_run.sh full  GPU newsrc_dat_bf_acdcLT_s0 ACDCLT 0  # (fog,night,rain,snow) x10
 #   DRY_RUN=1 ...   preflight only (no docker run)
 #
 # Differences from the older run_*_local.sh helpers: this launcher NEVER deletes or reuses
@@ -33,6 +35,10 @@ DRY_RUN="${DRY_RUN:-0}"
 CHECKPOINT="${HOST_OUT}/panoptic_fpn_R50_cityscapes_segw1/model_final.pth"
 EXPECTED_MD5="5f63c7578cb925552fd1b9d69980937a"
 DAT_BRANCH="dat-bf-panoptic-fpn"
+# Algorithm commit locked for all DAT-BF experiments. Tooling (scripts/, tools/ scorer) may move on,
+# but the model, config defaults, configs and shared train_net must stay byte-identical to it.
+ALGO_COMMIT="9837586bd59ca0a8aa65ff9247a2675e944b4468"
+ALGO_PATHS=(detectron2/detectron2 detectron2/configs detectron2/tools/train_net.py)
 SNAPSHOT_TAG="pre-dat-bf-20261013"
 # Untracked files that are known and intentionally excluded from the snapshot (Decision 8).
 ALLOWED_UNTRACKED=(
@@ -48,11 +54,14 @@ ALLOWED_UNTRACKED=(
 CSC12=(defocus_blur glass_blur motion_blur zoom_blur snow frost fog
        brightness contrast elastic_transform pixelate jpeg_compression)
 ACDC4=(fog night rain snow)
+CSC_LT_CYCLE=(fog motion_blur snow brightness defocus_blur)   # same cycle as the other baselines' CSC-LT
+LT_ROUNDS=10
 
 fail() { echo "ERROR: $*" >&2; exit 2; }
 
 [[ "${MODE}" == smoke || "${MODE}" == full ]] || fail "mode must be smoke or full"
-[[ "${PROTOCOL}" == CSC12 || "${PROTOCOL}" == ACDC4 ]] || fail "protocol must be CSC12 or ACDC4"
+[[ "${PROTOCOL}" == CSC12 || "${PROTOCOL}" == ACDC4 || "${PROTOCOL}" == CSCLT || "${PROTOCOL}" == ACDCLT ]] ||
+    fail "protocol must be CSC12, ACDC4, CSCLT or ACDCLT"
 [[ "${GPU}" =~ ^[0-9]+$ && "${SEED}" =~ ^[0-9]+$ ]] || fail "GPU and SEED must be integers"
 [[ "${EXP}" =~ ^[A-Za-z0-9_]+$ ]] || fail "EXP must match [A-Za-z0-9_]+"
 
@@ -70,13 +79,22 @@ if [[ "${MODE}" == smoke ]]; then
     CFG="detectron2/configs/Cityscapes/newsrc_dat_bf_csc.yaml"
 else
     [[ "${EXP}" != dat_bf_smoke* && "${EXP}" != *smoke* ]] || fail "full-run name must not contain 'smoke'"
-    if [[ "${PROTOCOL}" == CSC12 ]]; then
-        [[ "${EXP}" == "newsrc_dat_bf_csc12_s${SEED}" ]] || fail "CSC12 full run must be named newsrc_dat_bf_csc12_s${SEED}"
-        items=("${CSC12[@]}"); suffix="_semseg"; CFG="detectron2/configs/Cityscapes/newsrc_dat_bf_csc.yaml"
-    else
-        [[ "${EXP}" == "newsrc_dat_bf_acdc4_s${SEED}" ]] || fail "ACDC4 full run must be named newsrc_dat_bf_acdc4_s${SEED}"
-        items=("${ACDC4[@]/#/acdc_}"); suffix="_semseg"; CFG="detectron2/configs/Cityscapes/newsrc_dat_bf_acdc.yaml"
-    fi
+    case "${PROTOCOL}" in
+        CSC12)
+            [[ "${EXP}" == "newsrc_dat_bf_csc12_s${SEED}" ]] || fail "CSC12 full run must be named newsrc_dat_bf_csc12_s${SEED}"
+            items=("${CSC12[@]}"); suffix="_semseg"; CFG="detectron2/configs/Cityscapes/newsrc_dat_bf_csc.yaml" ;;
+        ACDC4)
+            [[ "${EXP}" == "newsrc_dat_bf_acdc4_s${SEED}" ]] || fail "ACDC4 full run must be named newsrc_dat_bf_acdc4_s${SEED}"
+            items=("${ACDC4[@]/#/acdc_}"); suffix="_semseg"; CFG="detectron2/configs/Cityscapes/newsrc_dat_bf_acdc.yaml" ;;
+        CSCLT)
+            [[ "${EXP}" == "newsrc_dat_bf_cscLT_s${SEED}" ]] || fail "CSCLT full run must be named newsrc_dat_bf_cscLT_s${SEED}"
+            items=(); for ((r=0; r<LT_ROUNDS; r++)); do items+=("${CSC_LT_CYCLE[@]}"); done
+            suffix="_semseg"; CFG="detectron2/configs/Cityscapes/newsrc_dat_bf_csc.yaml" ;;
+        ACDCLT)
+            [[ "${EXP}" == "newsrc_dat_bf_acdcLT_s${SEED}" ]] || fail "ACDCLT full run must be named newsrc_dat_bf_acdcLT_s${SEED}"
+            items=(); for ((r=0; r<LT_ROUNDS; r++)); do items+=("${ACDC4[@]/#/acdc_}"); done
+            suffix="_semseg"; CFG="detectron2/configs/Cityscapes/newsrc_dat_bf_acdc.yaml" ;;
+    esac
     STREAM="("; SCORE_SPECS=""
     for it in "${items[@]}"; do STREAM+="\"${it}${suffix}\","; SCORE_SPECS+="${it}${suffix} "; done
     STREAM="${STREAM%,})"
@@ -119,10 +137,15 @@ while IFS= read -r line; do
     ((ok)) || unexpected+="${line}"$'\n'
 done < <(git -C "${HOST_REPO}" status --porcelain --untracked-files=normal | grep '^??' || true)
 [[ -z "${unexpected}" ]] || fail "unexpected untracked files (not in the Decision-8 allow-list):"$'\n'"${unexpected}"
+git -C "${HOST_REPO}" cat-file -e "${ALGO_COMMIT}^{commit}" || fail "locked algorithm commit ${ALGO_COMMIT} not found"
+git -C "${HOST_REPO}" merge-base --is-ancestor "${ALGO_COMMIT}" HEAD || fail "${ALGO_COMMIT} is not an ancestor of HEAD"
+if ! git -C "${HOST_REPO}" diff --quiet "${ALGO_COMMIT}" HEAD -- "${ALGO_PATHS[@]}"; then
+    fail "algorithm paths differ from locked commit ${ALGO_COMMIT}: $(git -C "${HOST_REPO}" diff --stat "${ALGO_COMMIT}" HEAD -- "${ALGO_PATHS[@]}" | tail -1)"
+fi
 git_state="clean (tracked tree identical to HEAD; only allow-listed untracked files present)"
 
 # ---- datasets ----
-if [[ "${PROTOCOL}" == CSC12 ]]; then
+if [[ "${PROTOCOL}" == CSC12 || "${PROTOCOL}" == CSCLT ]]; then
     MOUNTS=(-v "${CITYSCAPES_ROOT_CSC}:/datasets/cityscapes:ro")
     for c in "${CSC12[@]}"; do
         [[ -d "${CSC_ROOT}/${c}/leftImg8bit/val" ]] || fail "missing ${CSC_ROOT}/${c}/leftImg8bit/val"
@@ -144,6 +167,7 @@ echo "CONFIG: ${CFG}"
 echo "STREAM: ${STREAM}"
 echo "OUTPUT: ${RUN_HOST}"
 echo "GIT: ${git_sha} (${git_state})"
+echo "ALGORITHM COMMIT (verified identical): ${ALGO_COMMIT}"
 echo "MD5: ${actual_md5}"
 echo "======================================================================"
 if [[ "${DRY_RUN}" == 1 ]]; then
@@ -166,6 +190,7 @@ mkdir -p "$(dirname "${LOG}")" "$(dirname "${META}")"
     echo "git_branch=${git_branch}"
     echo "git_sha=${git_sha}"
     echo "git_state=${git_state}"
+    echo "algorithm_commit=${ALGO_COMMIT} (detectron2/detectron2, detectron2/configs and train_net.py verified identical to HEAD)"
     echo "snapshot_tag=${SNAPSHOT_TAG} -> $(git -C "${HOST_REPO}" rev-parse "${SNAPSHOT_TAG}^{commit}")"
     echo "model_weights=/workspace/output/panoptic_fpn_R50_cityscapes_segw1/model_final.pth"
     echo "checkpoint_md5=${actual_md5}"
