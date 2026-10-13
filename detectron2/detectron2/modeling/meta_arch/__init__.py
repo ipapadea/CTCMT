@@ -13,8 +13,10 @@ from .fcos import FCOS
 from .semantic_seg import SEM_SEG_HEADS_REGISTRY, SemanticSegmentor, build_sem_seg_head
 from .amrod import AMROD
 from .cotta_semseg import CoTTA_SemSeg
+from .ctaod_yoo import CTAOD_Yoo
 from .ctcmt_mtl import CTCMT_MTL
 from .ctcmt_seg import CTCMT_Seg
+from .obao_semseg import OBAO_SemSeg
 from .tent_semseg import TENT_SemSeg
 
 __all__ = list(globals().keys())

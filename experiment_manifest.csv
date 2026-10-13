@@ -1,0 +1,10 @@
+id,priority,protocol,variant,seeds,status,gpu,notes
+E01,1,CSC12,efficiency_base_taskcoco_ours,0,planned,,same GPU sequential
+E02,2,CSC12,ctcr_weight_0_0p1_0p3_0p5_1p0,0,planned,,unique configs
+E02b,2,ACDC4,ctcr_weight_0_0p1_0p3_0p5_1p0,0,optional,,after CSC12
+E03,3,CSC12,qualitative_joint_predictions,0,planned,,fixed images and model states
+E04,4,CSC12,component_ablation,0_1_2,planned,,reuse matching runs only
+E05,5,CSC12,stream_order_canonical_reverse_random,0,planned,,uninterrupted stream
+E06,6,all,extract_AP_AP50_AP75,existing,planned,,CPU only
+E07,7,TBD,extra_dataset_or_backbone,TBD,optional,,needs compatibility audit
+E08,8,TBD,recent_2025_2026_baseline,TBD,optional,,requires code/protocol audit

@@ -574,6 +574,16 @@ _C.SOLVER.COTTA_RESTORE_PROB = 0.01
 _C.SOLVER.COTTA_CONF_THRESH = 0.72
 _C.SOLVER.COTTA_AUG_SCALES = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
 _C.SOLVER.COTTA_AUG_FLIPS = (False, True)
+# ---- OBAO segmentation (Gong et al. ECCV 2024).
+_C.SOLVER.OBAO_LR = 0.0001
+_C.SOLVER.OBAO_EMA_DECAY = 0.999
+_C.SOLVER.OBAO_RESTORE_PROB = 0.01
+_C.SOLVER.OBAO_ANCHOR_CONFIDENCE = 0.69
+_C.SOLVER.OBAO_MARGIN = 0.02
+_C.SOLVER.OBAO_PCE_WEIGHT = 1.0
+_C.SOLVER.OBAO_TOPOLOGY_WEIGHT = 0.01
+_C.SOLVER.OBAO_AUG_SCALES = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
+_C.SOLVER.OBAO_AUG_FLIPS = (False, True)
 # ---- CT-CMT-MTL (Moraiti et al. 2026 extended) for PanopticFPN.
 _C.SOLVER.CTCMT_WEIGHT_DET = 1.0
 _C.SOLVER.CTCMT_WEIGHT_SEG = 1.0
@@ -616,6 +626,24 @@ _C.SOLVER.CTCMT_STRONG_AUG_STUDENT = False
 # ported to measure how much of their advantage comes from restoration.
 # Must never be reported as one of our contributions.
 _C.SOLVER.CTCMT_FISHER_RESTORE = False
+
+# --- Experimental Fisher variants (paper26_fisher_*). Both default OFF. ---
+# Fisher-guided restoration: same per-tensor Binomial restore budget as the
+# random baseline, but the restored entries are the LOWEST empirical-Fisher
+# (g^2 of the final combined gradient) ones. Does not touch any gradient.
+# Independent of the AMROD-diagnostic CTCMT_FISHER_RESTORE above.
+_C.SOLVER.CTCMT_FISHER_RESTORE_ENABLED = False
+# Simple Fisher cross-task routing on shared ResNet params. DET = detection
+# gradient, AUX = seg + anchor + CT-CR gradient. On a conflicting element
+# (g_det*g_aux < 0) the task with higher (lagged, per-tensor-normalised) EMA
+# Fisher keeps full weight and the other is scaled by LAMBDA.
+# Requires CTCMT_CONFLICT_MODE == "none".
+_C.SOLVER.CTCMT_FISHER_XTASK_ENABLED = False
+_C.SOLVER.CTCMT_FISHER_XTASK_BETA = 0.99
+_C.SOLVER.CTCMT_FISHER_XTASK_WARMUP = 50      # detection-active updates
+_C.SOLVER.CTCMT_FISHER_XTASK_LAMBDA = 0.5
+_C.SOLVER.CTCMT_FISHER_XTASK_SCOPE = "resnet"       # only "resnet" implemented
+_C.SOLVER.CTCMT_FISHER_XTASK_GRANULARITY = "param"  # only "param" implemented
 
 # Class-balanced segmentation consistency: weight each pixel by the inverse
 # teacher class marginal ^ beta, countering minority-class collapse.
@@ -818,6 +846,33 @@ _C.TEST.AUG.FLIP = True
 
 _C.TEST.PRECISE_BN = CN({"ENABLED": False})
 _C.TEST.PRECISE_BN.NUM_ITER = 200
+
+# ---------------------------------------------------------------------------- #
+# CTAOD (Yoo et al., CVPR'24) online detection adaptation.
+# Namespaced separately from the unrelated legacy flag SOLVER.CTAOD (AMROD).
+# ---------------------------------------------------------------------------- #
+_C.TEST.CTAOD_YOO = CN()
+# Offline source-feature statistics produced by tools/collect_ctaod_source_stats.py
+_C.TEST.CTAOD_YOO.SOURCE_STATS_PATH = ""
+_C.TEST.CTAOD_YOO.GLOBAL_ALIGN = "KL"
+_C.TEST.CTAOD_YOO.FOREGROUND_ALIGN = "KL"
+_C.TEST.CTAOD_YOO.ALPHA_GLOBAL = 1.0
+_C.TEST.CTAOD_YOO.ALPHA_FOREGROUND = 1.0
+_C.TEST.CTAOD_YOO.TH_BG = 0.5
+_C.TEST.CTAOD_YOO.EMA_GAMMA = 128
+_C.TEST.CTAOD_YOO.FREQ_WEIGHT = True
+_C.TEST.CTAOD_YOO.ADAPTER_RATIO = 32
+# "" = always update (CTAOD).  "stat-period-ema" = official CTAOD-Skip.
+_C.TEST.CTAOD_YOO.SKIP_REDUNDANT = ""
+_C.TEST.CTAOD_YOO.SKIP_TAU = 1.1
+_C.TEST.CTAOD_YOO.SKIP_PERIOD = 10
+_C.TEST.CTAOD_YOO.SKIP_BETA = 1.05
+# Diagnostic only: for the first N frames, also run a post-update forward and
+# log how much the prediction would have changed.  0 disables.
+_C.TEST.CTAOD_YOO.DIAG_PREPOST_FRAMES = 0
+# Source-statistics collection (offline, source train split, GT boxes).
+_C.TEST.CTAOD_YOO.COLLECT_IOU_THR = 0.5
+_C.TEST.CTAOD_YOO.COLLECT_NUM_IMAGES = -1
 
 # ---------------------------------------------------------------------------- #
 # Misc options

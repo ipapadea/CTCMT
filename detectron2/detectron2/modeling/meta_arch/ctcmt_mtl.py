@@ -484,11 +484,45 @@ class CTCMT_MTL(nn.Module):
             "w_seg_sum": 0.0, "c_det_sum": 0.0, "c_seg_sum": 0.0,
         }
         self._grad_fallbacks = 0
+
+        # --- Experimental Fisher variants (paper26_fisher_*), default OFF ---
+        self.fisher_guided_restore = bool(
+            getattr(cfg.SOLVER, "CTCMT_FISHER_RESTORE_ENABLED", False))
+        self.fisher_xtask = bool(getattr(cfg.SOLVER, "CTCMT_FISHER_XTASK_ENABLED", False))
+        self.fx_beta = float(getattr(cfg.SOLVER, "CTCMT_FISHER_XTASK_BETA", 0.99))
+        self.fx_warmup = int(getattr(cfg.SOLVER, "CTCMT_FISHER_XTASK_WARMUP", 50))
+        self.fx_lambda = float(getattr(cfg.SOLVER, "CTCMT_FISHER_XTASK_LAMBDA", 0.5))
+        self.fx_scope = str(getattr(cfg.SOLVER, "CTCMT_FISHER_XTASK_SCOPE", "resnet")).lower()
+        self.fx_gran = str(
+            getattr(cfg.SOLVER, "CTCMT_FISHER_XTASK_GRANULARITY", "param")).lower()
+        if self.fisher_guided_restore and self.fisher_restore:
+            raise ValueError("CTCMT_FISHER_RESTORE_ENABLED and the legacy "
+                             "CTCMT_FISHER_RESTORE are mutually exclusive")
+        if self.fisher_guided_restore and self.adaptive_str:
+            raise ValueError("CTCMT_FISHER_RESTORE_ENABLED does not support ADAPTIVE_STR")
+        if self.fisher_xtask:
+            if self.conflict_mode != "none":
+                raise ValueError("CTCMT_FISHER_XTASK_ENABLED requires "
+                                 "CTCMT_CONFLICT_MODE='none'")
+            if self.fx_scope != "resnet":
+                raise NotImplementedError("CTCMT_FISHER_XTASK_SCOPE: only 'resnet'")
+            if self.fx_gran != "param":
+                raise NotImplementedError("CTCMT_FISHER_XTASK_GRANULARITY: only 'param'")
+            if not 0.0 <= self.fx_beta < 1.0 or not 0.0 <= self.fx_lambda <= 1.0:
+                raise ValueError("bad CTCMT_FISHER_XTASK_BETA / _LAMBDA")
+        self._fx_F_det = None        # name -> FP32 EMA of g_det^2 (ResNet only)
+        self._fx_F_aux = None        # name -> FP32 EMA of g_aux^2
+        self._fx_n_active = 0        # detection-active (paired) updates so far
+        self._fx_stats = None        # [3 blocks, 11] GPU accumulator, flushed in logs
+        self._fx_stat_steps = 0
+        self._fr_has_grad = False
+        self._fr_stats = None        # GPU accumulator for Fisher-restore sanity stats
         # How often the conditional CoTTA-style aug-averaging actually fired.
         self._seg_aug_fired = 0
         self._seg_steps = 0
 
         self.iter = 0
+        self._fx_out_dir = str(cfg.OUTPUT_DIR)
         # ---------------------------------------------------------------
         # Optional diagnostics.
         #
@@ -1379,6 +1413,8 @@ class CTCMT_MTL(nn.Module):
         """
         if self.conflict_mode == "task_coco":
             return self._backward_task_coco(loss_dict)
+        if self.fisher_xtask:
+            return self._backward_fisher_xtask(loss_dict)
 
         diag = {}
         groups = {}
@@ -1576,6 +1612,154 @@ class CTCMT_MTL(nn.Module):
         return diag
 
     # ------------------------------------------------------------------
+    # Experimental: simple Fisher cross-task routing (DET vs AUX).
+    # AUX = seg + anchor + CT-CR (every non-"det" loss group).
+    # ------------------------------------------------------------------
+    _FX_BLOCKS = ("res3", "res4", "res5")
+    # stats columns: n, sumF_det, sumF_aux, det_gt, aux_gt, conflict,
+    #                det_prot, aux_prot, sum_c_det, sum_c_aux, n_routed
+    _FX_NCOL = 11
+
+    def _backward_fisher_xtask(self, loss_dict):
+        """Two backwards (DET, AUX); ResNet res3-5 routed by lagged Fisher.
+
+        route_t = f(F_{t-1}, g_det_t, g_aux_t); only afterwards are the EMAs
+        updated with the UNMODIFIED current task gradients. Steps without a
+        usable DET or AUX gradient use the plain joint gradient and update
+        nothing. FPN / heads always receive g_det + g_aux.
+        """
+        groups = {}
+        for k, v in loss_dict.items():
+            g = k.split("/")[0]
+            groups[g] = v if g not in groups else groups[g] + v
+        det_loss = groups.get("det")
+        aux_keys = sorted(k for k in groups if k != "det")
+        aux_loss = sum(groups[k] for k in aux_keys) if aux_keys else None
+        if (det_loss is None or aux_loss is None
+                or not det_loss.requires_grad or not aux_loss.requires_grad):
+            total = sum(loss_dict.values())
+            if total.requires_grad:
+                total.backward()
+            return {}
+
+        self._ensure_param_index()
+        det_loss.backward(retain_graph=True)
+        g_det = self._snapshot_grads()
+        aux_loss.backward()
+        g_aux = self._snapshot_grads()
+
+        if self._fx_F_det is None:
+            self._fx_F_det = {n: torch.zeros(p.shape, dtype=torch.float32, device=p.device)
+                              for n, p in self._param_index if n in self._resnet_set}
+            self._fx_F_aux = {n: torch.zeros_like(f) for n, f in self._fx_F_det.items()}
+            self._fx_stats = torch.zeros(len(self._FX_BLOCKS), self._FX_NCOL,
+                                         dtype=torch.float64,
+                                         device=next(iter(self._fx_F_det.values())).device)
+        routing_on = self._fx_n_active >= self.fx_warmup
+        lam, beta, eps = self.fx_lambda, self.fx_beta, 1e-30
+
+        for n, p in self._param_index:
+            gd, ga = g_det.get(n), g_aux.get(n)
+            if gd is None and ga is None:
+                p.grad = None
+                continue
+            if n not in self._fx_F_det:
+                out = torch.zeros_like(p)
+                if gd is not None:
+                    out.add_(gd)
+                if ga is not None:
+                    out.add_(ga)
+                p.grad = out
+                continue
+
+            gd = torch.zeros_like(p) if gd is None else gd
+            ga = torch.zeros_like(p) if ga is None else ga
+            Fd, Fa = self._fx_F_det[n], self._fx_F_aux[n]   # F_{t-1}
+            if routing_on:
+                Fdn = Fd / (Fd.mean() + eps)
+                Fan = Fa / (Fa.mean() + eps)
+                conflict = (gd * ga) < 0
+                near = (Fdn - Fan).abs() <= 1e-3 * torch.maximum(Fdn, Fan)
+                det_prot = conflict & (Fdn > Fan) & ~near   # keep DET, scale AUX
+                aux_prot = conflict & (Fan > Fdn) & ~near   # keep AUX, scale DET
+                c_det = 1.0 - (1.0 - lam) * aux_prot.to(gd.dtype)
+                c_aux = 1.0 - (1.0 - lam) * det_prot.to(ga.dtype)
+                out = gd * c_det + ga * c_aux
+                blk = _shared_block_of(n)
+                if blk in self._FX_BLOCKS:
+                    row = self._fx_stats[self._FX_BLOCKS.index(blk)]
+                    row += torch.stack([
+                        torch.tensor(float(p.numel()), device=row.device,
+                                     dtype=torch.float64),
+                        Fd.sum().double(), Fa.sum().double(),
+                        (Fdn > Fan).sum().double(), (Fan > Fdn).sum().double(),
+                        conflict.sum().double(), det_prot.sum().double(),
+                        aux_prot.sum().double(), c_det.sum().double(),
+                        c_aux.sum().double(),
+                        torch.tensor(1.0, device=row.device, dtype=torch.float64),
+                    ])
+            else:
+                out = gd + ga
+            p.grad = out
+            # Lagged update: the unmodified current gradients enter F only now.
+            Fd.mul_(beta).addcmul_(gd.float(), gd.float(), value=1.0 - beta)
+            Fa.mul_(beta).addcmul_(ga.float(), ga.float(), value=1.0 - beta)
+
+        self._fx_n_active += 1
+        if routing_on:
+            self._fx_stat_steps += 1
+        return {}
+
+    def _fx_flush_log(self):
+        """Print + JSONL the accumulated routing statistics, then reset."""
+        if not self.fisher_xtask or self._fx_stats is None:
+            return
+        st = self._fx_stats.cpu().tolist()
+        rec = {"iter": self.iter, "det_active_updates": self._fx_n_active,
+               "warmup": self.fx_warmup, "routing_on": self._fx_n_active > self.fx_warmup,
+               "routed_steps_in_window": self._fx_stat_steps, "blocks": {}}
+        tot = [0.0] * self._FX_NCOL
+        for b, row in zip(self._FX_BLOCKS, st):
+            for i, v in enumerate(row):
+                tot[i] += v
+            rec["blocks"][b] = self._fx_summarize(row)
+        rec["all"] = self._fx_summarize(tot)
+        a = rec["all"]
+        if a:
+            print(f"[CT-CMT-FXTASK] iter={self.iter} det_active={self._fx_n_active} "
+                  f"F_det={a['mean_F_det']:.3e} F_aux={a['mean_F_aux']:.3e} "
+                  f"Fdet>Faux={a['frac_Fdet_gt_Faux']:.3f} Faux>Fdet={a['frac_Faux_gt_Fdet']:.3f} "
+                  f"conflict={a['frac_conflict']:.3f} det_prot={a['frac_det_protect']:.4f} "
+                  f"aux_prot={a['frac_aux_protect']:.4f} c_det={a['mean_c_det']:.4f} "
+                  f"c_aux={a['mean_c_aux']:.4f} | "
+                  + " ".join(f"{b}:conf={r['frac_conflict']:.3f}/dp={r['frac_det_protect']:.4f}"
+                             f"/ap={r['frac_aux_protect']:.4f}"
+                             for b, r in rec["blocks"].items() if r))
+        elif self._fx_n_active > 0:
+            print(f"[CT-CMT-FXTASK] iter={self.iter} warm-up det_active="
+                  f"{self._fx_n_active}/{self.fx_warmup}")
+        try:
+            d = os.path.join(self._fx_out_dir, "fisher_xtask.jsonl")
+            os.makedirs(self._fx_out_dir, exist_ok=True)
+            with open(d, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+        except Exception as exc:
+            print(f"[CT-CMT-FXTASK] jsonl write failed: {exc}")
+        self._fx_stats.zero_()
+        self._fx_stat_steps = 0
+
+    @staticmethod
+    def _fx_summarize(row):
+        n = row[0]
+        if n <= 0:
+            return {}
+        return {"n_units": n, "mean_F_det": row[1] / n, "mean_F_aux": row[2] / n,
+                "frac_Fdet_gt_Faux": row[3] / n, "frac_Faux_gt_Fdet": row[4] / n,
+                "frac_conflict": row[5] / n, "frac_det_protect": row[6] / n,
+                "frac_aux_protect": row[7] / n,
+                "mean_c_det": row[8] / n, "mean_c_aux": row[9] / n}
+
+    # ------------------------------------------------------------------
     # EMA + stochastic restore.
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -1592,6 +1776,8 @@ class CTCMT_MTL(nn.Module):
     def _stochastic_restore(self, fisher=None):
         if self.restore_prob <= 0.0:
             return
+        if self.fisher_guided_restore:
+            return self._fisher_guided_restore()
         # Fisher mode needs the gradients from this step; skip when none exist.
         if self.fisher_restore and not fisher:
             return
@@ -1639,6 +1825,68 @@ class CTCMT_MTL(nn.Module):
                     mask = (torch.rand_like(p) < rst).float()
                 src_dev = src.to(p.device, non_blocking=True)
                 p.data.mul_(1.0 - mask).add_(src_dev * mask)
+
+    @torch.no_grad()
+    def _fisher_guided_restore(self):
+        """Random-budget-matched restore that prefers LOW-Fisher entries.
+
+        Per trainable weight/bias tensor (same set and same per-tensor
+        probability ``rst`` as the random baseline) draw k ~ Binomial(n, rst)
+        and restore the k entries with the smallest (F/Fmax + 1e-8) * U, where
+        F = (final combined gradient)^2 and U ~ Uniform(0,1). Tensors without a
+        gradient (or steps without any loss) have F = 0, i.e. plain random.
+        Gradients, losses, LR and the optimizer are never touched.
+        """
+        shared_prefixes = ("backbone.", "fpn.", "proposal_generator.anchor_generator.")
+        dev_stats = None
+        for nm, m in self.student.named_modules():
+            for np_name, p in m.named_parameters(recurse=False):
+                if np_name not in ("weight", "bias") or not p.requires_grad:
+                    continue
+                key = f"{nm}.{np_name}"
+                src = self._source_params.get(key)
+                if src is None:
+                    continue
+                rst = self.restore_prob
+                if self.cross_task_fisher and any(key.startswith(x) for x in shared_prefixes):
+                    rst = rst * self.backbone_rst_factor
+                if rst <= 0.0:
+                    continue
+                n = p.numel()
+                # CPU binomial: no GPU sync; same count law as Bernoulli(rst) mask.
+                k = int(torch.binomial(torch.tensor([float(n)]),
+                                       torch.tensor([float(rst)])).item())
+                if k <= 0:
+                    continue
+                pf = p.data.view(-1)
+                sf = src.to(p.device, non_blocking=True).view(-1)
+                if k >= n:
+                    pf.copy_(sf)
+                    continue
+                if self._fr_has_grad and p.grad is not None:
+                    F = p.grad.detach().float().pow(2).view(-1)
+                    Fn = F / F.max().clamp_min(1e-30)
+                else:
+                    Fn = torch.zeros(n, device=p.device)
+                score = (Fn + 1e-8) * torch.rand_like(Fn)
+                idx = torch.topk(score, k, largest=False).indices
+                pf[idx] = sf[idx]
+                # sanity stat: mean normalised F of restored vs all entries
+                st = torch.stack([Fn[idx].sum().double(), Fn.mean().double() * k,
+                                  torch.tensor(float(k), device=p.device,
+                                               dtype=torch.float64)])
+                dev_stats = st if dev_stats is None else dev_stats + st
+        if dev_stats is not None:
+            self._fr_stats = dev_stats if self._fr_stats is None else self._fr_stats + dev_stats
+
+    def _fr_flush_log(self):
+        if not self.fisher_guided_restore or self._fr_stats is None:
+            return
+        sel, exp, k = self._fr_stats.cpu().tolist()
+        print(f"[CT-CMT-FRESTORE] iter={self.iter} restored={int(k)} "
+              f"selF/randF={(sel / exp) if exp > 0 else float('nan'):.4f} "
+              f"(<1 => restored entries have lower Fisher than random)")
+        self._fr_stats.zero_()
 
     def _diag_write(self, record):
         """Append one diagnostic record as JSONL.
@@ -2415,10 +2663,13 @@ class CTCMT_MTL(nn.Module):
             self.optimizer.step()
 
         # 4. EMA + stochastic restore.
+        self._fr_has_grad = bool(loss_dict)
         self._update_teacher()
         self._stochastic_restore(fisher)
 
         if self.iter % 50 == 0:
+            self._fx_flush_log()
+            self._fr_flush_log()
             summary = " ".join(f"{k}={float(v.detach()):.3f}" for k, v in loss_dict.items())
             tag = ""
             if self.per_task_gate:
