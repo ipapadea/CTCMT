@@ -242,6 +242,7 @@ class DATPFN(nn.Module):
             "expected_tensors": int(cfg.SOLVER.DAT_EXPECTED_TENSORS),
             "expected_elements": int(cfg.SOLVER.DAT_EXPECTED_ELEMENTS),
             "save_predictions": bool(cfg.SOLVER.DAT_SAVE_PREDICTIONS),
+            "audit": bool(cfg.SOLVER.DAT_AUDIT),
             "official_repo_sha": str(cfg.SOLVER.DAT_OFFICIAL_REPO_SHA),
         }
         return {
@@ -436,6 +437,7 @@ class DATPFN(nn.Module):
         sel_idx = self.selector.selected_sorted
         step_taken = False
         diag = {}
+        audit_pre = [p.detach().clone() for p in self.params] if self.hp["audit"] else None  # diagnostic only
         with torch.no_grad():
             s_pred = s_logits.argmax(dim=1)
             student_disagree = float(((s_pred != pseudo) & valid).sum()) / n_valid
@@ -473,9 +475,13 @@ class DATPFN(nn.Module):
 
         # ---- EMA teacher after the student step (all parameters, fixed alpha) -- #
         with torch.no_grad():
+            teacher_pre = [p.detach().clone() for p in self.teacher.parameters()] if self.hp["audit"] else None
             d = self.hp["ema_decay"]
             for tp, sp in zip(self.teacher.parameters(), self.student.parameters()):
                 tp.mul_(d).add_(sp.detach(), alpha=1.0 - d)
+        if self.hp["audit"]:
+            diag.update(self._audit(audit_pre, teacher_pre, sel_idx))
+            del audit_pre, teacher_pre
 
         # ---- logging --------------------------------------------------------- #
         frac = lambda m: float(m.sum()) / n_valid
@@ -518,6 +524,59 @@ class DATPFN(nn.Module):
             self._save_pred("primary", primary[0], self.iter)
             self._save_pred("plain_view", secondary[0], self.iter)
         return primary
+
+    # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def _audit(self, pre_student, pre_teacher, sel_idx):
+        """Diagnostic-only structural audit (never aborts, never modifies state or RNG).
+
+        * only tensors in the selected set may change on the student;
+        * the teacher update must satisfy t' = d*t + (1-d)*s up to float32 rounding;
+        * non-selected tensors must stay at the source values (student exactly, teacher up to
+          EMA rounding).
+        """
+        sel = set(sel_idx)
+        d = self.hp["ema_decay"]
+        eps32 = 2.0 ** -23
+        ema_tol = 2.0 ** -21  # ~4 float32 ulps of the operand magnitudes
+        changed_nonsel, changed_nonsel_max = 0, 0.0
+        unchanged_sel = 0
+        nonsel_src_changed, nonsel_src_max = 0, 0.0
+        ema_res_max, ema_ratio_max = 0.0, 0.0
+        t_dev_max, t_dev_ratio_max = 0.0, 0.0
+        teacher_params = list(self.teacher.parameters())
+        for i, (p, pre) in enumerate(zip(self.params, pre_student)):
+            p = p.detach()
+            same = torch.equal(p, pre)
+            if i in sel:
+                unchanged_sel += int(same)
+            elif not same:
+                changed_nonsel += 1
+                changed_nonsel_max = max(changed_nonsel_max, float((p - pre).abs().max()))
+            src = self._anchor_list[i].detach()
+            if i not in sel and not torch.equal(p, src):
+                nonsel_src_changed += 1
+                nonsel_src_max = max(nonsel_src_max, float((p - src).abs().max()))
+            s64, tpre64, tpost = p.double(), pre_teacher[i].double(), teacher_params[i].detach().double()
+            res = (tpost - (d * tpre64 + (1.0 - d) * s64)).abs()
+            ema_res_max = max(ema_res_max, float(res.max()))
+            ema_ratio_max = max(ema_ratio_max, float((res / (ema_tol * (tpre64.abs() + s64.abs()) + 1e-30)).max()))
+            if i not in sel:
+                dev = (tpost - src.double()).abs()
+                t_dev_max = max(t_dev_max, float(dev.max()))
+                t_dev_ratio_max = max(t_dev_ratio_max, float((dev / (eps32 * src.double().abs() + 1e-30)).max()))
+        return {
+            "audit_changed_nonselected_student_tensors": changed_nonsel,
+            "audit_changed_nonselected_student_max_abs": changed_nonsel_max,
+            "audit_unchanged_selected_student_tensors": unchanged_sel,
+            "audit_nonselected_student_vs_source_changed_tensors": nonsel_src_changed,
+            "audit_nonselected_student_vs_source_max_abs": nonsel_src_max,
+            "audit_ema_residual_max_abs": ema_res_max,
+            "audit_ema_residual_ratio_max": ema_ratio_max,  # <= 1 means within tolerance
+            "audit_ema_consistent": ema_ratio_max <= 1.0,
+            "audit_nonselected_teacher_dev_max_abs": t_dev_max,
+            "audit_nonselected_teacher_dev_ratio_max": t_dev_ratio_max,  # in units of 2^-23 * |source|
+        }
 
     # ------------------------------------------------------------------ #
     @torch.no_grad()

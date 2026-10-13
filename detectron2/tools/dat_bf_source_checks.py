@@ -15,6 +15,12 @@ import numpy as np
 import torch
 from PIL import Image
 
+# Test harness only: the audit on/off comparison needs bitwise-reproducible kernels
+# (run with CUBLAS_WORKSPACE_CONFIG=:4096:8). Nothing in the model sets these flags.
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+torch.use_deterministic_algorithms(True, warn_only=True)
+
 from detectron2.config import get_cfg
 from detectron2.modeling import build_model
 from detectron2.modeling.meta_arch.dat_pfn import DATDivergenceError
@@ -156,6 +162,42 @@ def main():
     print("outcomes seen:", sorted({r["dsp"]["outcome"] for r in logs} | {r["trp"]["outcome"] for r in logs}))
     print("group fractions per frame (dsp, trp, mid):",
           [(round(r["frac_dsp"], 3), round(r["frac_trp"], 3), round(r["frac_mid"], 3)) for r in logs])
+
+    # ---- audit invariants (target-path instrumentation) and audit on/off equivalence ---- #
+    check("audit: changed_nonselected_student_tensors == 0 on every frame",
+          all(r["audit_changed_nonselected_student_tensors"] == 0 and r["audit_changed_nonselected_student_max_abs"] == 0.0
+              for r in logs))
+    check("audit: non-selected student tensors identical to source on every frame",
+          all(r["audit_nonselected_student_vs_source_changed_tensors"] == 0 for r in logs))
+    check("audit: EMA consistency within tolerance on every frame", all(r["audit_ema_consistent"] for r in logs),
+          f"max ratio={max(r['audit_ema_residual_ratio_max'] for r in logs):.3f}, "
+          f"max resid={max(r['audit_ema_residual_max_abs'] for r in logs):.2e}")
+    check("audit: unchanged selected tensors logged",
+          all(0 <= r["audit_unchanged_selected_student_tensors"] <= r["selected_tensors"] for r in logs))
+    print("audit: non-selected teacher dev max abs / ratio(2^-23|src|):",
+          max(r["audit_nonselected_teacher_dev_max_abs"] for r in logs),
+          max(r["audit_nonselected_teacher_dev_ratio_max"] for r in logs))
+    state_a = [p.detach().clone() for p in model.student.parameters()] + [p.detach().clone() for p in model.teacher.parameters()]
+    cfg_b = cfg.clone()
+    cfg_b.defrost()
+    cfg_b.SOLVER.DAT_AUDIT = False
+    cfg_b.OUTPUT_DIR = args.out.rstrip("/") + "_noaudit"
+    cfg_b.freeze()
+    model_b = build_model(cfg_b)
+    logs_b = []
+    for inp in inputs:
+        model_b([inp])
+        logs_b.append(json.loads(open(model_b._frame_log_path).read().strip().splitlines()[-1]))
+    state_b = [p.detach().clone() for p in model_b.student.parameters()] + [p.detach().clone() for p in model_b.teacher.parameters()]
+    n_diff = sum(0 if torch.equal(a, b) else 1 for a, b in zip(state_a, state_b))
+    skip = ("frame_ms",)
+    fields = [k for k in logs[0] if not k.startswith("audit_") and k not in skip]
+    log_equal = all(ra[k] == rb[k] for ra, rb in zip(logs, logs_b) for k in fields)
+    print(f"audit on/off: {n_diff} of {len(state_a)} student+teacher tensors differ bitwise; non-audit log fields equal: {log_equal}")
+    check("audit on/off: student and teacher states bitwise identical", n_diff == 0)
+    check("audit on/off: all non-audit logged quantities identical", log_equal)
+    check("audit off writes no audit fields", not any(k.startswith("audit_") for r in logs_b for k in r))
+    del model_b, state_b
 
     # ---- guards ------------------------------------------------------------- #
     model.params[0].grad = torch.ones_like(model.params[0])
