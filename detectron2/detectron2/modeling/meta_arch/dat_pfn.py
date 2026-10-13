@@ -291,6 +291,17 @@ class DATPFN(nn.Module):
             "teacher_aug_views": len(self._aug_ops),
             "reset_occurred": False,
             "frame_log": self._frame_log_path,
+            "torch_version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+            "cudnn_version": torch.backends.cudnn.version(),
+            "gpu_name": torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "cpu",
+            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "tf32_matmul": torch.backends.cuda.matmul.allow_tf32,
+            "tf32_cudnn": torch.backends.cudnn.allow_tf32,
+            "env_NVIDIA_TF32_OVERRIDE": os.environ.get("NVIDIA_TF32_OVERRIDE"),
+            "env_CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         }
         log_run_provenance(cfg, method="DAT-BF (same-source Panoptic-FPN port)", extra=extra, logger=logger)
 
