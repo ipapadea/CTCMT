@@ -1,0 +1,65 @@
+== Slides 20-21 (3-seed means; compare with tables) ==
+CTCMT ACDC4                                             n=3  AP50  38.007 +- 0.254   mIoU  37.800 +- 0.064
+CTCMT CSC12                                             n=3  AP50  17.722 +- 0.264   mIoU  30.073 +- 0.189
+CTCMT ACDC-LT                                           n=3  AP50  44.076 +- 0.357   mIoU  41.921 +- 0.256
+CTCMT CSC-LT                                            n=3  AP50  26.725 +- 0.463   mIoU  33.334 +- 0.320
+Base ACDC4                                              n=3  AP50  36.839 +- 0.072   mIoU  36.864 +- 0.172
+Base CSC12                                              n=3  AP50  16.957 +- 0.291   mIoU  28.948 +- 0.665
+Base ACDC-LT                                            n=3  AP50  42.494 +- 0.090   mIoU  41.219 +- 0.087
+Base CSC-LT                                             n=3  AP50  25.266 +- 0.511   mIoU  33.677 +- 0.251
+CT-CR+Task-CoCo ACDC4                                   n=3  AP50  37.749 +- 0.315   mIoU  37.556 +- 0.230
+CT-CR+Task-CoCo CSC12                                   n=3  AP50  17.267 +- 0.328   mIoU  29.921 +- 0.203
+CT-CR+Task-CoCo ACDC-LT                                 n=3  AP50  43.369 +- 0.129   mIoU  41.632 +- 0.230
+CT-CR+Task-CoCo CSC-LT                                  n=3  AP50  25.806 +- 0.299   mIoU  32.733 +- 0.216
+
+== Slide 12 (CSC12 ablation) ==
+ablate base                                             n=3  AP50  16.999 +- 0.059   mIoU  28.985 +- 0.502
+ablate ctcr                                             n=3  AP50  17.869 +- 0.318   mIoU  30.217 +- 0.341
+ablate ctcl                                             n=3  AP50  16.796 +- 0.055   mIoU  29.291 +- 0.231
+ablate both                                             n=3  AP50  17.576 +- 0.335   mIoU  29.994 +- 0.154
+ablate all                                              n=3  AP50  17.648 +- 0.194   mIoU  30.159 +- 0.190
+
+== Slide 16 (seed 0) ==
+weight 0p0 csc12                                        n=1  AP50  16.904 +- 0.000   mIoU  28.681 +- 0.000
+weight 0p0 acdc4                                        n=1  AP50  36.930 +- 0.000   mIoU  37.051 +- 0.000
+weight 0p1 csc12                                        n=1  AP50  17.504 +- 0.000   mIoU  29.543 +- 0.000
+weight 0p1 acdc4                                        n=1  AP50  37.401 +- 0.000   mIoU  37.207 +- 0.000
+weight 0p3 csc12                                        n=1  AP50  17.840 +- 0.000   mIoU  30.278 +- 0.000
+weight 0p3 acdc4                                        n=1  AP50  38.367 +- 0.000   mIoU  37.773 +- 0.000
+weight 0p5 csc12                                        n=1  AP50  17.980 +- 0.000   mIoU  30.430 +- 0.000
+weight 0p5 acdc4                                        n=1  AP50  39.012 +- 0.000   mIoU  37.673 +- 0.000
+weight 1p0 csc12                                        n=1  AP50  19.446 +- 0.000   mIoU  29.734 +- 0.000
+weight 1p0 acdc4                                        n=1  AP50     nan +- 0.000   mIoU   1.652 +- 0.000
+order canonical base                                    n=1  AP50  16.907 +- 0.000   mIoU  28.838 +- 0.000
+order canonical ours                                    n=1  AP50  18.110 +- 0.000   mIoU  30.267 +- 0.000
+order reverse base                                      n=1  AP50  18.220 +- 0.000   mIoU  30.137 +- 0.000
+order reverse ours                                      n=1  AP50  19.018 +- 0.000   mIoU  31.229 +- 0.000
+order random2026 base                                   n=1  AP50  17.393 +- 0.000   mIoU  29.594 +- 0.000
+order random2026 ours                                   n=1  AP50  18.040 +- 0.000   mIoU  30.734 +- 0.000
+
+== Slides 13/15 (OLD source checkpoint, CSC-LT) ==
+Full MTL e13a (CT-CL 0.5 + CT-CR 0.3), seed 0           n=1  AP50  24.796 +- 0.000   mIoU  30.831 +- 0.000
+DET-only e15, seed 0                                    n=1  AP50  26.801 +- 0.000   mIoU  35.515 +- 0.000
+DET-only e15, 3 seeds                                   n=3  AP50  26.927 +- 0.198   mIoU  35.697 +- 0.163
+SEG-only e21, seed 0                                    n=1  AP50  15.096 +- 0.000   mIoU  28.206 +- 0.000
+Routed SEG e22 (aux_head_only), 3 seeds                 n=3  AP50  26.761 +- 0.137   mIoU  34.601 +- 0.129
+
+== Restore diagnostic (seed 0) ==
+headline ACDC4 (restore on)                             n=1  AP50  38.289 +- 0.000   mIoU  37.789 +- 0.000
+no restore ACDC4                                        n=1  AP50  39.401 +- 0.000   mIoU  38.089 +- 0.000
+headline CSC12 (restore on)                             n=1  AP50  18.025 +- 0.000   mIoU  30.237 +- 0.000
+no restore CSC12                                        n=1  AP50  18.091 +- 0.000   mIoU  30.103 +- 0.000
+
+== Resolved key config of representative runs ==
+headline_lam1_acdc4_s0 ('CTCMT_MTL', {'CONFLICT_MODE': 'resnet_route', 'AUX_TRUNK_LAMBDA': 1.0, 'WEIGHT_CTCR': 0.3, 'CTCR_MODE': 'soft_seg_global', 'WEIGHT_CTCL': 0.0, 'CTCL_ENABLED': False, 'CTPV_ENABLED': False, 'ANCHOR_MARGINAL_WEIGHT': 0.1, 'CLASS_BALANCED_CE': True, 'SEG_LOSS_SCALE_PRESERVE': True, 'STRONG_AUG_STUDENT': True, 'SEG_AUG_ENABLED': True, 'CROSS_TASK_FISHER': True, 'BACKBONE_RST_FACTOR': 0.1, 'RST_M': 0.01, 'MT': 0.9998, 'THRESHOLD_MAX': 0.9, 'SCORE_THRESH': 1.4, 'DET_ONLY': False, 'SEG_ONLY': False})
+headline_lam1_csc12_s0 ('CTCMT_MTL', {'CONFLICT_MODE': 'resnet_route', 'AUX_TRUNK_LAMBDA': 1.0, 'WEIGHT_CTCR': 0.3, 'CTCR_MODE': 'soft_seg_global', 'WEIGHT_CTCL': 0.0, 'CTCL_ENABLED': False, 'CTPV_ENABLED': False, 'ANCHOR_MARGINAL_WEIGHT': 0.1, 'CLASS_BALANCED_CE': True, 'SEG_LOSS_SCALE_PRESERVE': True, 'STRONG_AUG_STUDENT': True, 'SEG_AUG_ENABLED': True, 'CROSS_TASK_FISHER': True, 'BACKBONE_RST_FACTOR': 0.1, 'RST_M': 0.01, 'MT': 0.9998, 'THRESHOLD_MAX': 0.8, 'SCORE_THRESH': 1.4, 'DET_ONLY': False, 'SEG_ONLY': False})
+paper_base_acdc4_s0 ('CTCMT_MTL', {'CONFLICT_MODE': 'none', 'AUX_TRUNK_LAMBDA': 0.0, 'WEIGHT_CTCR': 0.0, 'CTCR_MODE': 'soft_seg_global', 'WEIGHT_CTCL': 0.0, 'CTCL_ENABLED': False, 'CTPV_ENABLED': False, 'ANCHOR_MARGINAL_WEIGHT': 0.1, 'CLASS_BALANCED_CE': True, 'SEG_LOSS_SCALE_PRESERVE': True, 'STRONG_AUG_STUDENT': True, 'SEG_AUG_ENABLED': True, 'CROSS_TASK_FISHER': True, 'BACKBONE_RST_FACTOR': 0.1, 'RST_M': 0.01, 'MT': 0.9998, 'THRESHOLD_MAX': 0.9, 'SCORE_THRESH': 1.4, 'DET_ONLY': False, 'SEG_ONLY': False})
+paper_taskcoco_acdc4_s42 ('CTCMT_MTL', {'CONFLICT_MODE': 'task_coco', 'AUX_TRUNK_LAMBDA': 0.0, 'WEIGHT_CTCR': 0.3, 'CTCR_MODE': 'soft_seg_global', 'WEIGHT_CTCL': 0.0, 'CTCL_ENABLED': False, 'CTPV_ENABLED': False, 'ANCHOR_MARGINAL_WEIGHT': 0.1, 'CLASS_BALANCED_CE': True, 'SEG_LOSS_SCALE_PRESERVE': True, 'STRONG_AUG_STUDENT': True, 'SEG_AUG_ENABLED': True, 'CROSS_TASK_FISHER': True, 'BACKBONE_RST_FACTOR': 0.1, 'RST_M': 0.01, 'MT': 0.9998, 'THRESHOLD_MAX': 0.9, 'SCORE_THRESH': 1.4, 'DET_ONLY': False, 'SEG_ONLY': False})
+e13a_thrmax080_cscLT_s0 ('CTCMT_MTL', {'CONFLICT_MODE': None, 'AUX_TRUNK_LAMBDA': None, 'WEIGHT_CTCR': 0.3, 'CTCR_MODE': 'soft_seg_global', 'WEIGHT_CTCL': 0.5, 'CTCL_ENABLED': True, 'CTPV_ENABLED': False, 'ANCHOR_MARGINAL_WEIGHT': 0.1, 'CLASS_BALANCED_CE': True, 'SEG_LOSS_SCALE_PRESERVE': True, 'STRONG_AUG_STUDENT': True, 'SEG_AUG_ENABLED': True, 'CROSS_TASK_FISHER': True, 'BACKBONE_RST_FACTOR': 0.1, 'RST_M': 0.01, 'MT': 0.9998, 'THRESHOLD_MAX': 0.8, 'SCORE_THRESH': 1.4, 'DET_ONLY': False, 'SEG_ONLY': False})
+e22_seghead_only_cscLT_s0 ('CTCMT_MTL', {'CONFLICT_MODE': 'aux_head_only', 'AUX_TRUNK_LAMBDA': None, 'WEIGHT_CTCR': 0.3, 'CTCR_MODE': 'soft_seg_global', 'WEIGHT_CTCL': 0.5, 'CTCL_ENABLED': True, 'CTPV_ENABLED': False, 'ANCHOR_MARGINAL_WEIGHT': 0.1, 'CLASS_BALANCED_CE': True, 'SEG_LOSS_SCALE_PRESERVE': True, 'STRONG_AUG_STUDENT': True, 'SEG_AUG_ENABLED': True, 'CROSS_TASK_FISHER': True, 'BACKBONE_RST_FACTOR': 0.1, 'RST_M': 0.01, 'MT': 0.9998, 'THRESHOLD_MAX': 0.8, 'SCORE_THRESH': 1.4, 'DET_ONLY': False, 'SEG_ONLY': False})
+
+== Stdout traces: gate behaviour and aug-avg firing rate ==
+headline_lam1_acdc4_s0.log: prints=32 gate-closed-with-pseudo-boxes=3 seg+anchor+ctcr present in all of them=True segaug fired=1590/1600 (0.994)
+headline_lam1_csc12_s0.log: prints=120 gate-closed-with-pseudo-boxes=11 seg+anchor+ctcr present in all of them=True segaug fired=5805/6000 (0.968)
+batch_lam1_acdcLT_s0_explicit.out: prints=320 gate-closed-with-pseudo-boxes=66 seg+anchor+ctcr present in all of them=True segaug fired=15895/16000 (0.993)
+batch_lam1_cscLT_s0_explicit.out: prints=500 gate-closed-with-pseudo-boxes=36 seg+anchor+ctcr present in all of them=True segaug fired=24451/25000 (0.978)

@@ -1,0 +1,149 @@
+% =============================================================================
+% Final result tables: one slide per dataset (short-term + long-term side by side)
+% plus one backup slide with protocol notes.
+% Drop-in frames: replace slides 20, 21, 22, 23 and 25 of
+% CTCMT_lab_meeting_simple_v2.tex with these three frames.
+% Needs only booktabs + amsmath (already in the preamble).
+%
+% Provenance (all verified against amrod_output/ctta_acdc logs):
+%   Source   : canonical segw1 Panoptic-FPN, no adaptation, per-domain mean
+%              (CSC-LT source = mean over its 5 corruptions; ACDC-LT = ACDC4)
+%   TENT, CoTTA, OBAO-seg, DAT-BF, AMROD : same-source ports, seed 0
+%   CTAOD    : short-term 3 seeds; long-term seed 0 (CSC-LT = rerun)
+%   Base, CT-CR + Task-CoCo, CTCMT : mean +- std over seeds {0,42,123}
+% =============================================================================
+
+\newcommand{\nr}{n/r}                               % method not run on protocol
+\newcommand{\na}{\textcolor{gray}{--}}              % task not adapted by method
+\newcommand{\sd}[1]{{\tiny$\pm$#1}}
+\newcommand{\so}{$^\dagger$}                        % single seed
+\newcommand{\grp}[1]{\multicolumn{5}{l}{\textit{\textcolor{gray}{#1}}}\\}
+
+% -----------------------------------------------------------------------------
+\begin{frame}{Final Results: Cityscapes-C}
+
+\scriptsize
+\centering
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.0}
+
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{CSC12} (12 corruptions)}
+& \multicolumn{2}{c}{\textbf{CSC-LT} (5 corr.\ $\times$ 10 rounds)} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+\textbf{Method} & AP50 & mIoU & AP50 & mIoU \\
+\midrule
+Source (no adaptation) & 13.457 & 27.602 & 14.469 & 28.940 \\
+\midrule
+\grp{Segmentation-only CTTA}
+TENT\so     & \na & 27.257 & \na & 27.781 \\
+CoTTA\so    & \na & 26.015 & \na & 26.731 \\
+OBAO-seg\so & \na & 21.635 & \na & \nr \\
+DAT-BF\so   & \na & 16.568 & \na & 13.798 \\
+\midrule
+\grp{Detection-only CTTA}
+AMROD\so    & 15.788 & \na & 26.149 & \na \\
+CTAOD       & \textbf{22.106}\,\sd{0.335} & \na & 13.640\so & \na \\
+\midrule
+\grp{Joint detection + segmentation}
+Base (no CT-CR)    & 16.957\,\sd{0.291} & 28.948\,\sd{0.665}
+                   & 25.266\,\sd{0.511} & \textbf{33.677}\,\sd{0.251} \\
+CT-CR + Task-CoCo  & 17.267\,\sd{0.328} & 29.921\,\sd{0.203}
+                   & 25.806\,\sd{0.299} & 32.733\,\sd{0.216} \\
+\textbf{CTCMT (ours)}
+                   & 17.722\,\sd{0.264} & \textbf{30.073}\,\sd{0.189}
+                   & \textbf{26.725}\,\sd{0.463} & 33.334\,\sd{0.320} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.25em}
+{\tiny
+Bold: best per column. Joint methods: mean $\pm$ std over 3 seeds.
+\so~seed 0 only. \na~task not adapted. \nr~not run.
+}
+
+\vspace{0.15em}
+\begin{block}{Takeaway}
+\scriptsize
+Best mIoU on CSC12 and best AP50 on CSC-LT.
+CTAOD wins short-term AP50 but collapses over 10 rounds (24.3 $\rightarrow$ 2.2 AP50).
+On CSC-LT, CTCMT gives up 0.34 mIoU to Base in exchange for +1.46 AP50.
+\end{block}
+
+\end{frame}
+
+% -----------------------------------------------------------------------------
+\begin{frame}{Final Results: ACDC}
+
+\scriptsize
+\centering
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.0}
+
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{ACDC4} (fog, night, rain, snow)}
+& \multicolumn{2}{c}{\textbf{ACDC-LT} (4 dom.\ $\times$ 10 rounds)} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+\textbf{Method} & AP50 & mIoU & AP50 & mIoU \\
+\midrule
+Source (no adaptation) & 34.084 & 35.211 & 34.084 & 35.211 \\
+\midrule
+\grp{Segmentation-only CTTA}
+TENT\so     & \na & 35.289 & \na & 35.469 \\
+CoTTA\so    & \na & 34.376 & \na & 20.600 \\
+OBAO-seg\so & \na & \textbf{38.249} & \na & \nr \\
+DAT-BF\so   & \na & 36.221 & \na & 29.219 \\
+\midrule
+\grp{Detection-only CTTA}
+AMROD\so    & 35.547 & \na & 38.744 & \na \\
+CTAOD       & \textbf{38.788}\,\sd{0.126} & \na & 24.757\so & \na \\
+\midrule
+\grp{Joint detection + segmentation}
+Base (no CT-CR)    & 36.839\,\sd{0.072} & 36.864\,\sd{0.172}
+                   & 42.494\,\sd{0.090} & 41.219\,\sd{0.087} \\
+CT-CR + Task-CoCo  & 37.749\,\sd{0.315} & 37.556\,\sd{0.230}
+                   & 43.369\,\sd{0.129} & 41.632\,\sd{0.230} \\
+\textbf{CTCMT (ours)}
+                   & 38.007\,\sd{0.254} & 37.800\,\sd{0.064}
+                   & \textbf{44.076}\,\sd{0.357} & \textbf{41.921}\,\sd{0.256} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.25em}
+{\tiny
+Bold: best per column. Joint methods: mean $\pm$ std over 3 seeds.
+\so~seed 0 only. \na~task not adapted. \nr~not run.
+Source is static, so ACDC-LT source = ACDC4 source.
+}
+
+\vspace{0.15em}
+\begin{block}{Takeaway}
+\scriptsize
+Specialists win single short-term cells (CTAOD AP50 +0.8, OBAO-seg mIoU +0.4),
+but CTCMT is best on \textbf{both} tasks in ACDC-LT.
+CTAOD, CoTTA and DAT-BF degrade strongly over 10 rounds.
+\end{block}
+
+\end{frame}
+
+% -----------------------------------------------------------------------------
+% Backup: protocol caveats the audience may ask about.
+\begin{frame}{Backup: Baseline Protocol Notes}
+\small
+\begin{itemize}
+  \setlength{\itemsep}{3pt}
+  \item All methods start from the same Panoptic-FPN R50 Cityscapes checkpoint;
+        strict online, batch size 1, no resets.
+  \item TENT, CoTTA, OBAO-seg and DAT-BF adapt segmentation only;
+        AMROD and CTAOD adapt detection only.
+        Their numbers are task context, not joint multi-task results.
+  \item DAT-BF is a same-source Panoptic-FPN port, not an official DAT reproduction.
+        OBAO-seg official-code parity audit is still open; no long-term OBAO runs.
+  \item CT-CR + Task-CoCo uses the same CT-CR loss as CTCMT and adds gradient
+        coordination: it compares optimisation strategies, not a CT-CR-free baseline.
+  \item Single-seed baselines: TENT, CoTTA, OBAO-seg, DAT-BF, AMROD, CTAOD long-term.
+        CTAOD CSC-LT is the rerun (first run: 13.49).
+\end{itemize}
+\end{frame}
